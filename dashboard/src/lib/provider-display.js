@@ -18,6 +18,7 @@ const SPECIAL_PROVIDER_COPY_KEYS = {
   dsh: "provider.display.deepseek_harness",
   astrbot: "provider.display.astrbot",
   openbitfun: "provider.display.openbitfun",
+  zcode: "provider.display.zcode",
   omp: "provider.display.omp",
   omo: "provider.display.omo",
   traecn: "provider.display.trae_work_cn",

@@ -35,6 +35,7 @@ const SOURCE_FILTERS = [
   { id: "dsh", label: () => "DeepSeek Harness" },
   { id: "astrbot", label: () => "AstrBot" },
   { id: "openbitfun", label: () => "OpenBitFun" },
+  { id: "zcode", label: () => "ZCode" },
 ];
 
 const DATE_RANGES = [

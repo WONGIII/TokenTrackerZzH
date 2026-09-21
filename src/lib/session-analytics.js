@@ -45,6 +45,11 @@ const {
   readOpenBitFunTurnText,
   extractOpenBitFunTurnMetadata,
   openBitFunTurnTotals,
+  resolveZcodeDbPaths,
+  readZcodeSessionRows,
+  readZcodeDbMessages,
+  normalizeOpencodeTokens,
+  normalizeOpencodeModelFields,
 } = require("./rollout");
 const { parseCodexRolloutFile } = require("./codex-rollout-parser");
 const { computeRowCost, getModelPricing } = require("./pricing");
@@ -1649,6 +1654,145 @@ async function scanOpenBitFunSession({
   });
 }
 
+// ZCode timestamps are epoch milliseconds (session.time_created / time_updated
+// and message.data.time.{created,completed}); 0/NaN means "not recorded".
+function zcodeEpochMs(value) {
+  const ms = Number(value);
+  return Number.isFinite(ms) && ms > 0 ? ms : 0;
+}
+
+// The instant the usage parser buckets a message into: completion first, then
+// creation. timeUpdated (the row's own time_updated) only matters for a
+// projection that carries neither.
+function zcodeMessageTimestampMs(message) {
+  return zcodeEpochMs(message?.data?.time?.completed)
+    || zcodeEpochMs(message?.data?.time?.created)
+    || zcodeEpochMs(message?.timeUpdated);
+}
+
+/**
+ * ZCode session scanner.
+ *
+ * ZCode (Z.ai's coding agent, another OpenCode fork) keeps one SQLite database
+ * (~/.zcode/cli/db/db.sqlite — see resolveZcodeDbPaths in rollout.js) whose
+ * `session` table holds one row per session and whose `message` table holds one
+ * row per turn, with the assistant counters in message.data JSON. A session row
+ * is therefore the scan unit, and discovery hands the scan the messages already
+ * grouped by session_id.
+ *
+ * PRIVACY: only tokens, the model id and timestamps are read. ZCode keeps the
+ * transcript in message.data (prompts, assistant text, tool payloads) and in
+ * part.data; neither is touched here, and the projection readZcodeDbMessages
+ * returns is normalized down to counters before it ever reaches this function.
+ * The `part` table is never selected anywhere.
+ *
+ * The counters are mapped through the usage parser's own normalization
+ * (readZcodeDbMessages splits ZCode's INCLUSIVE input/output counters, then
+ * normalizeOpencodeTokens produces the queue columns), so a session's totals
+ * cannot drift from the half-hour buckets sync writes for the same rows.
+ */
+function scanZcodeSession({ dbPath, session, sessionId, messages }) {
+  const rows = Array.isArray(messages) ? messages : [];
+  const id = typeof sessionId === "string" && sessionId.trim()
+    ? sessionId.trim()
+    : (typeof session?.id === "string" ? session.id.trim() : "");
+  // The session row carries the working directory; a session whose row is gone
+  // (its messages are still counted usage) falls back to the cwd the messages
+  // themselves recorded.
+  const directory = typeof session?.directory === "string" && session.directory.trim()
+    ? session.directory.trim()
+    : (rows.map((message) => message?.data?.path?.cwd)
+      .find((value) => typeof value === "string" && value.trim()) || null);
+  const tokens = emptyTotals();
+  const bounds = emptyBounds();
+  const byModel = new Map();
+  let usageEvents = 0;
+  let lastModel = null;
+
+  // The session's own timestamps bound it even when none of its messages carries
+  // counters yet, the same fallback the AstrBot and OpenBitFun scanners use for
+  // their metadata.
+  const createdMs = zcodeEpochMs(session?.time_created);
+  if (createdMs) updateBounds(bounds, new Date(createdMs).toISOString());
+  const updatedMs = zcodeEpochMs(session?.time_updated);
+  if (updatedMs) updateBounds(bounds, new Date(updatedMs).toISOString());
+
+  for (const message of rows) {
+    const timestampMs = zcodeMessageTimestampMs(message);
+    if (timestampMs) updateBounds(bounds, new Date(timestampMs).toISOString());
+
+    const totals = normalizeOpencodeTokens(message?.data?.tokens);
+    if (!totals) continue;
+    // normalizeOpencodeModelFields is the same resolver the usage parser buckets
+    // by, so a model's label here matches its queue bucket name exactly.
+    const model = normalizeSessionModel(normalizeOpencodeModelFields(message?.data).modelId) || "unknown";
+    lastModel = model;
+    let usage = byModel.get(model);
+    if (!usage) {
+      usage = {
+        model,
+        input_tokens: 0,
+        cached_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        output_tokens: 0,
+        reasoning_output_tokens: 0,
+        total_tokens: 0,
+        usage_events: 0,
+      };
+      byModel.set(model, usage);
+    }
+    addTotals(usage, totals);
+    usage.usage_events += 1;
+    addTotals(tokens, totals);
+    usageEvents += 1;
+  }
+
+  return finalizeRecord({
+    version: SIDECAR_VERSION,
+    session_hash: sessionHash("zcode", id || dbPath),
+    session_id: id || null,
+    title: cleanSessionTitle(session?.title),
+    source: "zcode",
+    // ZCode records the session's working directory, so the browser can show
+    // where it ran. project_key is that directory's basename, the same
+    // convention the Claude and Codex scanners use.
+    project_key: directory ? projectKey(directory, null) : null,
+    project_ref: directory,
+    model: lastModel || "unknown",
+    ...bounds,
+    turns: rows.length,
+    edit_turns: 0,
+    retry_turns: 0,
+    subagent_calls: 0,
+    subagent_types: {},
+    tokens,
+    model_usage: [...byModel.values()],
+    usage_events: usageEvents,
+    usage_precision: usageEvents > 0 ? "reported" : "unavailable",
+    usage_is_incomplete: false,
+    cost_is_partial: false,
+    cost_source: "model_pricing",
+    provider_cost_usd: null,
+    model_calls: usageEvents,
+    api_duration_ms: 0,
+    context_tokens_used: 0,
+    context_window_tokens: 0,
+    context_usage_percent: 0,
+    tool_calls: 0,
+    tool_failures: 0,
+    error_count: 0,
+    compaction_count: 0,
+    provenance: {
+      source: "local-session-db",
+      confidence: usageEvents > 0 ? "observed" : "partial",
+      retry_confidence: "inferred",
+      content_retained: false,
+      usage: "message.data.tokens.input+output+reasoning+cache.read+cache.write",
+      cost: "model_pricing",
+    },
+  });
+}
+
 // AstrBot conversations are rows, not files: discovery reads each database once
 // (metadata plus usage) and emits one descriptor per conversation. Doing it here
 // rather than per conversation inside the scan matters because the sidecar cache
@@ -1693,11 +1837,64 @@ async function discoverAstrBotSessions(env = process.env, deps = {}) {
   return descriptors;
 }
 
+// ZCode sessions are rows, not files: discovery reads each database once
+// (session metadata plus the usage parser's own message projection) and emits
+// one descriptor per session, for the same cache reason as the AstrBot discovery
+// above.
+//
+// A session whose row is gone but whose messages are still in the database gets
+// a descriptor too: those rows are real billed usage, and dropping them would
+// make the browser disagree with what sync counted for the same database.
+async function discoverZcodeSessions(env = process.env, deps = {}) {
+  const descriptors = [];
+  for (const dbPath of resolveZcodeDbPaths(env, deps)) {
+    let sessions = [];
+    let messages = [];
+    try {
+      sessions = await readZcodeSessionRows(dbPath);
+      messages = readZcodeDbMessages(dbPath);
+    } catch (error) {
+      // A locked or half-written database must not poison the sidecar: skip this
+      // install and let the next refresh retry.
+      if (!process.env.NODE_TEST_CONTEXT) {
+        console.warn(`[session-analytics] skipped zcode database: ${error?.message || error}`);
+      }
+      continue;
+    }
+    const messagesBySession = new Map();
+    for (const message of messages) {
+      const key = typeof message?.sessionID === "string" ? message.sessionID.trim() : "";
+      if (!key) continue;
+      const list = messagesBySession.get(key);
+      if (list) list.push(message);
+      else messagesBySession.set(key, [message]);
+    }
+    // Message times drive the active-time accumulation, and the reader returns
+    // the native rows first with any older history after them, so hand them over
+    // in chronological order.
+    for (const list of messagesBySession.values()) {
+      list.sort((a, b) => zcodeMessageTimestampMs(a) - zcodeMessageTimestampMs(b));
+    }
+    const seen = new Set();
+    for (const session of sessions) {
+      const key = typeof session?.id === "string" ? session.id.trim() : "";
+      if (!key) continue;
+      seen.add(key);
+      descriptors.push({ dbPath, sessionId: key, session, messages: messagesBySession.get(key) || [] });
+    }
+    for (const [key, list] of messagesBySession) {
+      if (seen.has(key)) continue;
+      descriptors.push({ dbPath, sessionId: key, session: null, messages: list });
+    }
+  }
+  return descriptors;
+}
+
 async function discoverSessionFiles(home, env = process.env, deps = {}) {
   const grokHome = resolveGrokHome(home);
   const claudeRoots = providerRoots(home, ".claude", env, deps);
   const codexRoots = providerRoots(home, ".codex", env, deps);
-  const [claudeGroups, codexGroups, archivedGroups, grok, dsh, astrbot, openbitfun] = await Promise.all([
+  const [claudeGroups, codexGroups, archivedGroups, grok, dsh, astrbot, openbitfun, zcode] = await Promise.all([
     Promise.all(claudeRoots.map((r) => listClaudeProjectFiles(path.join(r, "projects")))),
     Promise.all(codexRoots.map((r) => listRolloutFilesDeep(path.join(r, "sessions")))),
     Promise.all(codexRoots.map((r) => listRolloutFilesDeep(path.join(r, "archived_sessions")))),
@@ -1712,6 +1909,9 @@ async function discoverSessionFiles(home, env = process.env, deps = {}) {
     // Same isolation again: this is what keeps a test (and a caller that injected
     // its own home) off the developer's real ~/.openbitfun install.
     resolveOpenBitFunSessions(env, { ...deps, nativeHome: home }),
+    // Same isolation once more for ZCode: without the injected home a test would
+    // read the developer's real ~/.zcode database instead of its fixture.
+    discoverZcodeSessions(env, { ...deps, nativeHome: home }),
   ]);
   const allClaude = groupClaudeFilesAcrossRoots(claudeGroups);
   const codex = [...new Set(codexGroups.flat())];
@@ -1723,7 +1923,7 @@ async function discoverSessionFiles(home, env = process.env, deps = {}) {
   const claude = allClaude.filter((filePaths) => !filePaths.some((filePath) => filePath
     .split(path.sep)
     .some((segment) => segment.endsWith(CLAUDE_MEM_OBSERVER_PROJECT_SUFFIX))));
-  return { claude, codex: groupCodexFiles([...codex, ...archived]), grok, dsh, astrbot, openbitfun };
+  return { claude, codex: groupCodexFiles([...codex, ...archived]), grok, dsh, astrbot, openbitfun, zcode };
 }
 
 function filesSignature(files) {
@@ -1873,6 +2073,9 @@ async function buildSessionAnalyticsInternal({ home = os.homedir(), force = fals
       descriptor.metadataPath,
       ...descriptor.turnFiles,
     ]),
+    // One entry per database, not per session, for the same reason as AstrBot:
+    // the file list is what the refresh signature hashes.
+    ...[...new Set(discovered.zcode.map((descriptor) => descriptor.dbPath))],
   ]);
   if (!force && previousMeta?.version === SIDECAR_VERSION && previousMeta.signature === signature) {
     await writeAtomic(metaPath, `${JSON.stringify({ ...previousMeta, checked_at: new Date().toISOString() })}\n`);
@@ -1914,6 +2117,15 @@ async function buildSessionAnalyticsInternal({ home = os.homedir(), force = fals
       // siblings.
       filePath: [descriptor.metadataPath, ...descriptor.turnFiles],
       scan: () => scanOpenBitFunSession(descriptor),
+    })),
+    ...discovered.zcode.map((descriptor) => ({
+      source: "zcode",
+      filePath: descriptor.dbPath,
+      // Every session of one database shares that database's stat, so the cache
+      // key has to carry the session identity as well — without it they collapse
+      // onto a single entry and all but one are rescanned (same as AstrBot).
+      cacheKey: sessionFileCacheKey("zcode", [descriptor.dbPath, descriptor.sessionId]),
+      scan: () => scanZcodeSession(descriptor),
     })),
   ];
   // Files we could not turn into a row (permission denied, half-written line,
@@ -2518,6 +2730,7 @@ module.exports = {
   scanDshSession,
   scanAstrBotSession,
   scanOpenBitFunSession,
+  scanZcodeSession,
   buildSessionAnalytics,
   summarizeSessions,
   listSessionsForBrowser,

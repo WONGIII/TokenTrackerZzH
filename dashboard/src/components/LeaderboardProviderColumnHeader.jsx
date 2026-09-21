@@ -17,6 +17,9 @@ const INVERT_IN_DARK = new Set([
   // image element resolves currentColor — same dark-mode inversion as the
   // harness mark.
   "/brand-logos/openbitfun.svg",
+  // The ZCode mark is `fill="currentColor"` with no colour of its own, so at the
+  // <img> boundary it renders solid black too — same inversion as OpenBitFun.
+  "/brand-logos/zcode.svg",
 ]);
 
 /**

@@ -559,6 +559,11 @@ const KNOWN_SOURCES = new Set([
   "astrbot",
   // OpenBitFun writes source "openbitfun" — same reason as AstrBot above.
   "openbitfun",
+  // ZCode (Z.ai's coding agent) writes source "zcode" — without it here its
+  // usage falls into the profile modal's generic "other" bucket, so the modal
+  // showed a leaderboard entry's ZCode tokens under a label the table beside it
+  // had already split out into its own column.
+  "zcode",
 ]);
 function canonicalSource(s: string) {
   return KNOWN_SOURCES.has(s) ? s : "other";

@@ -43,6 +43,18 @@ export const LEADERBOARD_TOKEN_COLUMNS = [
     icon: "/brand-logos/openbitfun.svg",
     provider: "openbitfun",
   },
+  // ZCode (source "zcode") gets the same explicit `provider` override as the
+  // harness, AstrBot and OpenBitFun, so the mobile badge resolves its brand mark
+  // by name rather than from the icon filename. /brand-logos/zcode.svg is the
+  // same currentColor glyph ProviderIcon draws inline, which <img> cannot
+  // resolve — hence its entry in LeaderboardProviderColumnHeader's
+  // INVERT_IN_DARK.
+  {
+    key: "zcode_tokens",
+    copyKey: "provider.display.zcode",
+    icon: "/brand-logos/zcode.svg",
+    provider: "zcode",
+  },
   { key: "opencode_tokens", copyKey: "leaderboard.column.opencode", icon: "/brand-logos/opencode.svg" },
   { key: "openclaw_tokens", copyKey: "leaderboard.column.openclaw", icon: "/brand-logos/openclaw.svg" },
   { key: "hermes_tokens", copyKey: "leaderboard.column.hermes", icon: "/brand-logos/hermes.svg" },

@@ -74,6 +74,7 @@ const {
   resolveAnythingllmDbPath,
   resolveAstrBotDbPaths,
   resolveOpenBitFunHomes,
+  resolveZcodeDbPaths,
   resolveDevinDbPath,
   resolveReasonixHome,
   resolveTraeStoragePath,
@@ -938,6 +939,19 @@ async function applyIntegrationSetup({
     if (openbitfunHomes.length > 0) {
       summary.push({
         label: "OpenBitFun",
+        status: "detected",
+        detail: "Passive reader (no hook needed)",
+      });
+    }
+  }
+
+  // ZCode (Z.ai's coding agent, an OpenCode fork): passive SQLite reader, like
+  // OpenBitFun — it writes its own database, so there is no hook to install.
+  {
+    const zcodeDbs = resolveZcodeDbPaths({ home: os.homedir(), env: process.env });
+    if (Array.isArray(zcodeDbs) && zcodeDbs.length > 0) {
+      summary.push({
+        label: "ZCode",
         status: "detected",
         detail: "Passive reader (no hook needed)",
       });

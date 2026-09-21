@@ -158,6 +158,7 @@
   "provider.display.deepseek_harness": "DeepSeek Harness",
   "provider.display.astrbot": "AstrBot",
   "provider.display.openbitfun": "OpenBitFun",
+  "provider.display.zcode": "ZCode",
   "provider.display.trae_work_cn": "TRAE Work 中国版",
   "limits.provider.antigravity": "Antigravity",
   "limits.provider.zcode": "ZCode",

@@ -5295,6 +5295,107 @@ function readZcodeDbMessages(dbPath, sqliteOptions = {}) {
   return [...historicalMessages, ...nativeMessages];
 }
 
+const ZCODE_DB_FILE_NAME = "db.sqlite";
+
+const ZCODE_TABLE_PROBE_SQL =
+  "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('session','message')";
+
+// Every ZCode CLI database this machine can see, existence-checked,
+// de-duplicated and sorted so the parsed set is deterministic. Mirrors the
+// candidate order of resolveZcodeNativeDbPath() in install-resolver.js — the
+// home install first (ZCode keeps its DB under ~/.zcode on every platform),
+// with the win32 APPDATA location only as a fallback — because the session
+// browser and sync must never disagree about which install they describe.
+function resolveZcodeDbPaths(env = process.env, deps = {}) {
+  const platform = deps.platform || process.platform;
+  const existsSync = deps.existsSync || fssync.existsSync;
+  const injectedHome =
+    typeof deps.nativeHome === "string" && deps.nativeHome ? deps.nativeHome : null;
+  const home =
+    injectedHome ||
+    (platform === "win32"
+      ? env.USERPROFILE || env.HOME || os.homedir()
+      : env.HOME || os.homedir());
+  const envValue = (key) =>
+    typeof env[key] === "string" && env[key].trim() ? env[key].trim() : null;
+
+  const candidates = [];
+  // ZCODE_HOME (and the TokenTracker-specific spelling of it) names the
+  // ~/.zcode directory itself. An explicit override pins the install: when its
+  // database is missing we must not fall back to an APPDATA database, or the
+  // browser would describe a different ZCode install than the one the user
+  // pointed at (the same rule resolveZcodeNativeDbPath applies).
+  const homeOverride = envValue("TOKENTRACKER_ZCODE_HOME") || envValue("ZCODE_HOME");
+  if (homeOverride) {
+    candidates.push(path.join(path.resolve(homeOverride), "cli", "db", ZCODE_DB_FILE_NAME));
+  } else {
+    candidates.push(path.join(home, ".zcode", "cli", "db", ZCODE_DB_FILE_NAME));
+    // APPDATA is a machine-wide constant, so it must never widen an injected
+    // home: a caller that injected its own home (every test, and any caller
+    // that owns the home it describes) would otherwise also read the
+    // developer's real ZCode install.
+    if (!injectedHome && platform === "win32") {
+      const appData = envValue("APPDATA");
+      if (appData) {
+        candidates.push(path.join(appData, ".zcode", "cli", "db", ZCODE_DB_FILE_NAME));
+      }
+    }
+  }
+
+  return [...new Set(candidates.map((value) => path.resolve(value)))]
+    .filter((value) => existsSync(value))
+    .sort();
+}
+
+// Session metadata for the session browser. Only the five bookkeeping columns
+// are selected: ZCode keeps the transcript in message.data and part.data, and
+// neither belongs in the browser (see the privacy note at the top of
+// session-analytics.js). Same narrow-reader shape as readAstrBotRows — probe
+// the table first so a database that predates this schema degrades to "no
+// sessions" instead of failing the whole provider scan.
+const ZCODE_SESSION_SQL = [
+  "SELECT",
+  "  id,",
+  "  title,",
+  "  directory,",
+  "  time_created,",
+  "  time_updated",
+  "FROM session",
+  "WHERE id IS NOT NULL",
+  "ORDER BY time_created ASC, id ASC",
+].join("\n");
+
+async function readZcodeSessionRows(dbPath, sqliteOptions = {}) {
+  if (!dbPath || !fssync.existsSync(dbPath)) return [];
+  const options = {
+    label: "ZCode",
+    maxBuffer: 32 * 1024 * 1024,
+    timeout: 30_000,
+    readOnly: true,
+    throwOnReadFailure: true,
+    ...sqliteOptions,
+  };
+  let snapshot = null;
+  let effectiveDbPath = dbPath;
+  if (isUncPath(dbPath)) {
+    try {
+      snapshot = snapshotSqliteDb(dbPath);
+      effectiveDbPath = snapshot.path;
+    } catch (_e) { }
+  }
+  try {
+    const tables = new Set(
+      (await readSqliteJsonRowsAsync(effectiveDbPath, ZCODE_TABLE_PROBE_SQL, options))
+        .map((row) => row?.name)
+        .filter(Boolean),
+    );
+    if (!tables.has("session")) return [];
+    return await readSqliteJsonRowsAsync(effectiveDbPath, ZCODE_SESSION_SQL, options);
+  } finally {
+    if (snapshot) snapshot.cleanup();
+  }
+}
+
 async function parseOpencodeDbIncremental({
   dbMessages,
   dbPath,
@@ -22974,6 +23075,12 @@ module.exports = {
   readOpencodeDbMessagesIncremental,
   readMimoDbMessages,
   readZcodeDbMessages,
+  resolveZcodeDbPaths,
+  readZcodeSessionRows,
+  // Session scanner only: the same resolver the usage parser buckets by, so a
+  // session's per-model totals are named like the queue buckets sync writes
+  // (normalizeOpencodeTokens, used alongside it, is exported already).
+  normalizeOpencodeModelFields,
   hasZcodeNativeUsageSchema,
   resolveQoderDbPath,
   resolveQoderDbPaths,

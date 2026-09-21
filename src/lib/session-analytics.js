@@ -50,6 +50,10 @@ const {
   readZcodeDbMessages,
   normalizeOpencodeTokens,
   normalizeOpencodeModelFields,
+  resolveOpencodeDbPaths,
+  readOpencodeSessionRows,
+  readOpencodeSessionTurnCounts,
+  readOpencodeDbMessages,
 } = require("./rollout");
 const { parseCodexRolloutFile } = require("./codex-rollout-parser");
 const { computeRowCost, getModelPricing } = require("./pricing");
@@ -1793,6 +1797,164 @@ function scanZcodeSession({ dbPath, session, sessionId, messages }) {
   });
 }
 
+// opencode's `session.model` column is the same nested JSON shape
+// normalizeOpencodeModelFields already resolves for opencode2 message rows
+// ({"id":"deepseek-v4-pro","providerID":"deepseek","variant":"default"}); a fork
+// that wrote a bare model id into the column is handled by the resolver's own
+// flat-string branch. Shared by the scan and by discovery, which only opens the
+// message table when a session row has nothing here to give.
+function opencodeSessionModelFields(session) {
+  const raw = session?.model;
+  if (typeof raw !== "string" || !raw.trim()) return { modelId: null, providerId: "" };
+  let parsed = raw.trim();
+  try {
+    parsed = JSON.parse(parsed);
+  } catch (_e) {
+    // Not JSON: some forks store the bare model id in this column.
+  }
+  return normalizeOpencodeModelFields({ model: parsed });
+}
+
+/**
+ * opencode session scanner.
+ *
+ * opencode (the upstream ZCode forked from) keeps one SQLite database
+ * (<data dir>/opencode.db — see resolveOpencodeDbPaths in rollout.js) whose
+ * `session` table holds one row per session: identity, title, working
+ * directory, model AND the session's own token totals
+ * (tokens_input/output/reasoning/cache_read/cache_write). That row is the whole
+ * scan unit, and the divergence from the ZCode scanner next door is deliberate:
+ * ZCode has to sum message.data.tokens because its session row carries no
+ * counters, while here the totals are already aggregated on the row — a live
+ * install's opencode.db is ~731 MB (its bulk is the event and part tables), and
+ * the message table never has to be read for usage.
+ *
+ * PRIVACY: only counters, the model id, the title and timestamps are read. The
+ * transcript lives in message.data and part.data; nothing here selects it (the
+ * adapter's only message query is the content-free turn count in
+ * readOpencodeSessionTurnCounts).
+ *
+ * The five counters are mapped through the usage parser's own normalization
+ * (normalizeOpencodeTokens), so a session's totals cannot drift from the
+ * half-hour buckets sync writes for the same rows — verified equal against the
+ * message-level sums on a live database (session.tokens_input ===
+ * SUM(message.data.tokens.input), and so on for the other four columns).
+ */
+function scanOpencodeSession({ dbPath, session, sessionId, turns, messages }) {
+  const rows = Array.isArray(messages) ? messages : [];
+  const id = typeof sessionId === "string" && sessionId.trim()
+    ? sessionId.trim()
+    : (typeof session?.id === "string" ? session.id.trim() : "");
+  // opencode records the session's working directory (and its `path` twin);
+  // the directory is what the browser shows and what a resume command needs.
+  const directory = typeof session?.directory === "string" && session.directory.trim()
+    ? session.directory.trim()
+    : null;
+  const tokens = emptyTotals();
+  const bounds = emptyBounds();
+
+  // The session's own timestamps bound it even when it never produced a token,
+  // the same fallback the ZCode, AstrBot and OpenBitFun scanners use. They are
+  // epoch milliseconds (the shared coercion treats 0/NaN as "not recorded").
+  const createdMs = zcodeEpochMs(session?.time_created);
+  if (createdMs) updateBounds(bounds, new Date(createdMs).toISOString());
+  const updatedMs = zcodeEpochMs(session?.time_updated);
+  if (updatedMs) updateBounds(bounds, new Date(updatedMs).toISOString());
+
+  const totals = normalizeOpencodeTokens({
+    input: session?.tokens_input,
+    output: session?.tokens_output,
+    reasoning: session?.tokens_reasoning,
+    cache: {
+      read: session?.tokens_cache_read,
+      write: session?.tokens_cache_write,
+    },
+  });
+  // normalizeOpencodeTokens always returns a column set for an object input, so
+  // "no usage" here is an all-zero total — a session that never completed a turn
+  // — not a null. Same all-zero rule the usage parser's database reader applies
+  // to a message row before it counts it.
+  const hasUsage = finite(totals?.total_tokens) > 0;
+  const usageEvents = hasUsage ? 1 : 0;
+
+  // The session row's own model is authoritative; the message-level fallback
+  // only runs for a row that lost it (discovery hands messages over solely for
+  // those sessions), and it resolves the label exactly like the usage parser
+  // resolves a queue bucket, so the two can never disagree on the name.
+  let model = normalizeSessionModel(opencodeSessionModelFields(session).modelId);
+  if (!model) {
+    for (const message of rows) {
+      const candidate = normalizeSessionModel(normalizeOpencodeModelFields(message?.data).modelId);
+      if (candidate) model = candidate;
+    }
+  }
+  model = model || "unknown";
+
+  const modelUsage = [];
+  if (hasUsage) {
+    addTotals(tokens, totals);
+    // One aggregate row is one observed usage event, the same unit AstrBot uses
+    // for its per-conversation usage rows.
+    modelUsage.push({
+      model,
+      input_tokens: totals.input_tokens,
+      cached_input_tokens: totals.cached_input_tokens,
+      cache_creation_input_tokens: totals.cache_creation_input_tokens,
+      output_tokens: totals.output_tokens,
+      reasoning_output_tokens: totals.reasoning_output_tokens,
+      total_tokens: totals.total_tokens,
+      usage_events: usageEvents,
+    });
+  }
+
+  return finalizeRecord({
+    version: SIDECAR_VERSION,
+    session_hash: sessionHash("opencode", id || dbPath),
+    session_id: id || null,
+    title: cleanSessionTitle(session?.title),
+    source: "opencode",
+    // project_key is the directory's basename, the same convention the Claude,
+    // Codex and ZCode scanners use.
+    project_key: directory ? projectKey(directory, null) : null,
+    project_ref: directory,
+    model,
+    ...bounds,
+    // opencode keeps no turn counter on the session row: the count comes from
+    // the database-wide covering-index aggregate discovery ran (see
+    // readOpencodeSessionTurnCounts), never from reading a message body.
+    turns: Math.max(0, Math.floor(Number(turns) || 0)),
+    edit_turns: 0,
+    retry_turns: 0,
+    subagent_calls: 0,
+    subagent_types: {},
+    tokens,
+    model_usage: modelUsage,
+    usage_events: usageEvents,
+    usage_precision: hasUsage ? "reported" : "unavailable",
+    usage_is_incomplete: false,
+    cost_is_partial: false,
+    cost_source: "model_pricing",
+    provider_cost_usd: null,
+    model_calls: usageEvents,
+    api_duration_ms: 0,
+    context_tokens_used: 0,
+    context_window_tokens: 0,
+    context_usage_percent: 0,
+    tool_calls: 0,
+    tool_failures: 0,
+    error_count: 0,
+    compaction_count: 0,
+    provenance: {
+      source: "local-session-db",
+      confidence: hasUsage ? "observed" : "partial",
+      retry_confidence: "inferred",
+      content_retained: false,
+      usage: "session.tokens_input+output+reasoning+cache_read+cache_write",
+      cost: "model_pricing",
+    },
+  });
+}
+
 // AstrBot conversations are rows, not files: discovery reads each database once
 // (metadata plus usage) and emits one descriptor per conversation. Doing it here
 // rather than per conversation inside the scan matters because the sidecar cache
@@ -1890,11 +2052,66 @@ async function discoverZcodeSessions(env = process.env, deps = {}) {
   return descriptors;
 }
 
+// opencode sessions are rows, not files: discovery reads each database once
+// (session metadata plus the index-only turn counts) and emits one descriptor
+// per session, for the same cache reason as the AstrBot and ZCode discoveries
+// above.
+//
+// The message table is opened ONLY when a session row has lost its model: the row
+// already carries the totals, so the normal path never reads a message body, and
+// the fallback reuses the usage parser's own reader so a recovered model is named
+// exactly like the queue bucket sync writes.
+//
+// No orphan pass here, unlike ZCode: a session whose row is gone has no token
+// totals left — they live on that row, not on its messages — so a synthetic
+// zero-token row would be noise rather than usage.
+async function discoverOpencodeSessions(env = process.env, deps = {}) {
+  const descriptors = [];
+  for (const dbPath of resolveOpencodeDbPaths(env, deps)) {
+    let sessions = [];
+    let turnCounts = new Map();
+    try {
+      sessions = await readOpencodeSessionRows(dbPath);
+      turnCounts = await readOpencodeSessionTurnCounts(dbPath);
+    } catch (error) {
+      // A locked or half-written database must not poison the sidecar: skip this
+      // install and let the next refresh retry.
+      if (!process.env.NODE_TEST_CONTEXT) {
+        console.warn(`[session-analytics] skipped opencode database: ${error?.message || error}`);
+      }
+      continue;
+    }
+    let messagesBySession = null;
+    if (sessions.some((session) => !opencodeSessionModelFields(session).modelId)) {
+      messagesBySession = new Map();
+      for (const message of readOpencodeDbMessages(dbPath)) {
+        const key = typeof message?.sessionID === "string" ? message.sessionID.trim() : "";
+        if (!key) continue;
+        const list = messagesBySession.get(key);
+        if (list) list.push(message);
+        else messagesBySession.set(key, [message]);
+      }
+    }
+    for (const session of sessions) {
+      const key = typeof session?.id === "string" ? session.id.trim() : "";
+      if (!key) continue;
+      descriptors.push({
+        dbPath,
+        sessionId: key,
+        session,
+        turns: turnCounts.get(key) || 0,
+        messages: messagesBySession ? (messagesBySession.get(key) || []) : [],
+      });
+    }
+  }
+  return descriptors;
+}
+
 async function discoverSessionFiles(home, env = process.env, deps = {}) {
   const grokHome = resolveGrokHome(home);
   const claudeRoots = providerRoots(home, ".claude", env, deps);
   const codexRoots = providerRoots(home, ".codex", env, deps);
-  const [claudeGroups, codexGroups, archivedGroups, grok, dsh, astrbot, openbitfun, zcode] = await Promise.all([
+  const [claudeGroups, codexGroups, archivedGroups, grok, dsh, astrbot, openbitfun, zcode, opencode] = await Promise.all([
     Promise.all(claudeRoots.map((r) => listClaudeProjectFiles(path.join(r, "projects")))),
     Promise.all(codexRoots.map((r) => listRolloutFilesDeep(path.join(r, "sessions")))),
     Promise.all(codexRoots.map((r) => listRolloutFilesDeep(path.join(r, "archived_sessions")))),
@@ -1912,6 +2129,10 @@ async function discoverSessionFiles(home, env = process.env, deps = {}) {
     // Same isolation once more for ZCode: without the injected home a test would
     // read the developer's real ~/.zcode database instead of its fixture.
     discoverZcodeSessions(env, { ...deps, nativeHome: home }),
+    // And again for opencode: the injected home keeps a test off the developer's
+    // real ~/.local/share/opencode database (and off the machine's WSL install,
+    // since resolveOpencodeDbPaths only probes WSL for the real home).
+    discoverOpencodeSessions(env, { ...deps, nativeHome: home }),
   ]);
   const allClaude = groupClaudeFilesAcrossRoots(claudeGroups);
   const codex = [...new Set(codexGroups.flat())];
@@ -1923,7 +2144,7 @@ async function discoverSessionFiles(home, env = process.env, deps = {}) {
   const claude = allClaude.filter((filePaths) => !filePaths.some((filePath) => filePath
     .split(path.sep)
     .some((segment) => segment.endsWith(CLAUDE_MEM_OBSERVER_PROJECT_SUFFIX))));
-  return { claude, codex: groupCodexFiles([...codex, ...archived]), grok, dsh, astrbot, openbitfun, zcode };
+  return { claude, codex: groupCodexFiles([...codex, ...archived]), grok, dsh, astrbot, openbitfun, zcode, opencode };
 }
 
 function filesSignature(files) {
@@ -2076,6 +2297,7 @@ async function buildSessionAnalyticsInternal({ home = os.homedir(), force = fals
     // One entry per database, not per session, for the same reason as AstrBot:
     // the file list is what the refresh signature hashes.
     ...[...new Set(discovered.zcode.map((descriptor) => descriptor.dbPath))],
+    ...[...new Set(discovered.opencode.map((descriptor) => descriptor.dbPath))],
   ]);
   if (!force && previousMeta?.version === SIDECAR_VERSION && previousMeta.signature === signature) {
     await writeAtomic(metaPath, `${JSON.stringify({ ...previousMeta, checked_at: new Date().toISOString() })}\n`);
@@ -2126,6 +2348,15 @@ async function buildSessionAnalyticsInternal({ home = os.homedir(), force = fals
       // onto a single entry and all but one are rescanned (same as AstrBot).
       cacheKey: sessionFileCacheKey("zcode", [descriptor.dbPath, descriptor.sessionId]),
       scan: () => scanZcodeSession(descriptor),
+    })),
+    ...discovered.opencode.map((descriptor) => ({
+      source: "opencode",
+      filePath: descriptor.dbPath,
+      // Every session of one database shares that database's stat, so the cache
+      // key has to carry the session identity as well — without it they collapse
+      // onto a single entry and all but one are rescanned (same as AstrBot/ZCode).
+      cacheKey: sessionFileCacheKey("opencode", [descriptor.dbPath, descriptor.sessionId]),
+      scan: () => scanOpencodeSession(descriptor),
     })),
   ];
   // Files we could not turn into a row (permission denied, half-written line,
@@ -2731,6 +2962,7 @@ module.exports = {
   scanAstrBotSession,
   scanOpenBitFunSession,
   scanZcodeSession,
+  scanOpencodeSession,
   buildSessionAnalytics,
   summarizeSessions,
   listSessionsForBrowser,

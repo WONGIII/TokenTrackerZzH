@@ -5396,6 +5396,172 @@ async function readZcodeSessionRows(dbPath, sqliteOptions = {}) {
   }
 }
 
+const OPENCODE_DB_FILE_NAME = "opencode.db";
+
+const OPENCODE_TABLE_PROBE_SQL =
+  "SELECT name FROM sqlite_master WHERE type='table' AND name='session'";
+
+// OpenCode keeps its SQLite database in the same data directory as its JSON
+// storage: $OPENCODE_HOME, or $XDG_DATA_HOME/opencode — on every platform that
+// is <home>/.local/share/opencode. Sync resolves that directory through
+// resolveInstallPaths({ nativeValue, wslValue }) with a WSL probe of
+// `.local/share/opencode` (src/commands/sync.js), so the session browser reuses
+// the same resolution shape — the WSL half included — instead of re-deriving one
+// and describing a different install than the one sync counts.
+//
+// The file name is fixed (opencode.db): a channel build writing
+// opencode-<channel>.db is a usage-limits concern (discoverOpencodeDbPaths in
+// opencode-go-limits.js), not something the session browser should guess at.
+function resolveOpencodeDbPaths(env = process.env, deps = {}) {
+  const platform = deps.platform || process.platform;
+  const existsSync = deps.existsSync || fssync.existsSync;
+  const homedir = deps.homedir || os.homedir;
+  const injectedHome =
+    typeof deps.nativeHome === "string" && deps.nativeHome ? deps.nativeHome : null;
+  const home =
+    injectedHome ||
+    (platform === "win32"
+      ? env.USERPROFILE || env.HOME || os.homedir()
+      : env.HOME || os.homedir());
+  const envValue = (key) =>
+    (typeof env[key] === "string" && env[key].trim() ? env[key].trim() : null);
+
+  const xdgDataHome = envValue("XDG_DATA_HOME") || path.join(home, ".local", "share");
+  const nativeValue = envValue("OPENCODE_HOME") || path.join(xdgDataHome, "opencode");
+
+  // Only the machine's own home has a WSL sibling worth probing: discoverWslHome
+  // resolves \\wsl$ independently of `home`, so probing for an injected home
+  // (tests, a custom HOME) would splice the machine's live WSL sessions into what
+  // the caller expects to be an isolated tree. Same rule as providerRoots.
+  const probeWsl = deps.probeWsl !== undefined
+    ? Boolean(deps.probeWsl)
+    : path.resolve(home) === path.resolve(homedir());
+  const discoverWslHome = deps.discoverWslHome || wsl.discoverWslHome;
+  const wslValue = platform === "win32" && probeWsl && wsl.shouldProbeWsl(env)
+    ? discoverWslHome(".local/share/opencode", { env })
+    : null;
+
+  const resolved = resolveInstallPaths({ nativeValue, wslValue }, env, deps);
+  return [...new Set([resolved.native, resolved.wsl]
+    .filter(Boolean)
+    .map((dir) => path.resolve(path.join(dir, OPENCODE_DB_FILE_NAME))))]
+    .filter((value) => existsSync(value))
+    .sort();
+}
+
+// Session metadata for the session browser. opencode's `session` row carries
+// everything the browser needs — identity, title, working directory, model AND
+// the session's own token totals — so only those columns are selected: the
+// transcript lives in message.data and part.data and neither belongs here (see
+// the privacy note at the top of session-analytics.js). Same narrow-reader shape
+// as readZcodeSessionRows: probe the table first so a database that predates
+// this schema degrades to "no sessions" instead of failing the provider scan.
+const OPENCODE_SESSION_SQL = [
+  "SELECT",
+  "  id,",
+  "  title,",
+  "  directory,",
+  "  model,",
+  "  time_created,",
+  "  time_updated,",
+  "  tokens_input,",
+  "  tokens_output,",
+  "  tokens_reasoning,",
+  "  tokens_cache_read,",
+  "  tokens_cache_write",
+  "FROM session",
+  "WHERE id IS NOT NULL",
+  "ORDER BY time_created ASC, id ASC",
+].join("\n");
+
+async function readOpencodeSessionRows(dbPath, sqliteOptions = {}) {
+  if (!dbPath || !fssync.existsSync(dbPath)) return [];
+  const options = {
+    label: "OpenCode",
+    maxBuffer: 32 * 1024 * 1024,
+    timeout: 30_000,
+    readOnly: true,
+    throwOnReadFailure: true,
+    ...sqliteOptions,
+  };
+  let snapshot = null;
+  let effectiveDbPath = dbPath;
+  if (isUncPath(dbPath)) {
+    try {
+      snapshot = snapshotSqliteDb(dbPath);
+      effectiveDbPath = snapshot.path;
+    } catch (_e) { }
+  }
+  try {
+    const tables = await readSqliteJsonRowsAsync(effectiveDbPath, OPENCODE_TABLE_PROBE_SQL, options);
+    if (!Array.isArray(tables) || tables.length === 0) return [];
+    return await readSqliteJsonRowsAsync(effectiveDbPath, OPENCODE_SESSION_SQL, options);
+  } finally {
+    if (snapshot) snapshot.cleanup();
+  }
+}
+
+// One probe answers "which message table holds this database's rows?", the same
+// way detectOpencodeMessageLayout does for the usage reader: a pure v1 database
+// has an empty session_message table, a pure v2 one an empty message table.
+const OPENCODE_MESSAGE_TABLE_PROBE_SQL =
+  "SELECT (SELECT 1 FROM message LIMIT 1) AS hasV1, (SELECT 1 FROM session_message LIMIT 1) AS hasV2";
+
+// Turn counts for the session browser. opencode keeps no turn counter on the
+// session row, and the only source is the message table — the table this adapter
+// exists to avoid. The query is index-only: GROUP BY session_id resolves to
+// "SCAN message USING COVERING INDEX message_session_time_created_id_idx"
+// (verified with EXPLAIN QUERY PLAN), so it counts rows without reading a single
+// message body — an install's bulk lives in part/event, not in message. It is
+// also one aggregate per database, not one query per session.
+//
+// A turn count is decoration next to the tokens, so every failure here degrades
+// to "no counts" (0 turns) instead of hiding the sessions themselves.
+async function readOpencodeSessionTurnCounts(dbPath, sqliteOptions = {}) {
+  if (!dbPath || !fssync.existsSync(dbPath)) return new Map();
+  const options = {
+    label: "OpenCode",
+    maxBuffer: 32 * 1024 * 1024,
+    timeout: 30_000,
+    readOnly: true,
+    ...sqliteOptions,
+  };
+  let snapshot = null;
+  let effectiveDbPath = dbPath;
+  if (isUncPath(dbPath)) {
+    try {
+      snapshot = snapshotSqliteDb(dbPath);
+      effectiveDbPath = snapshot.path;
+    } catch (_e) { }
+  }
+  try {
+    let table = "message";
+    try {
+      const probe = await readSqliteJsonRowsAsync(effectiveDbPath, OPENCODE_MESSAGE_TABLE_PROBE_SQL, options);
+      if (probe?.[0]?.hasV2) table = "session_message";
+    } catch (_e) {
+      // No session_message table at all: this is a v1 database.
+    }
+    const rows = await readSqliteJsonRowsAsync(
+      effectiveDbPath,
+      "SELECT session_id, COUNT(*) AS turns FROM " + table
+        + " WHERE session_id IS NOT NULL GROUP BY session_id",
+      options,
+    );
+    const counts = new Map();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const key = typeof row?.session_id === "string" ? row.session_id.trim() : "";
+      if (!key) continue;
+      counts.set(key, Math.max(0, Math.floor(Number(row.turns) || 0)));
+    }
+    return counts;
+  } catch (_e) {
+    return new Map();
+  } finally {
+    if (snapshot) snapshot.cleanup();
+  }
+}
+
 async function parseOpencodeDbIncremental({
   dbMessages,
   dbPath,
@@ -23077,6 +23243,11 @@ module.exports = {
   readZcodeDbMessages,
   resolveZcodeDbPaths,
   readZcodeSessionRows,
+  // opencode (ZCode's upstream): the session browser reads the session row's own
+  // token totals, so it only needs the database path resolver and that row.
+  resolveOpencodeDbPaths,
+  readOpencodeSessionRows,
+  readOpencodeSessionTurnCounts,
   // Session scanner only: the same resolver the usage parser buckets by, so a
   // session's per-model totals are named like the queue buckets sync writes
   // (normalizeOpencodeTokens, used alongside it, is exported already).

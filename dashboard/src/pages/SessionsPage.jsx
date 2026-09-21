@@ -36,6 +36,7 @@ const SOURCE_FILTERS = [
   { id: "astrbot", label: () => "AstrBot" },
   { id: "openbitfun", label: () => "OpenBitFun" },
   { id: "zcode", label: () => "ZCode" },
+  { id: "opencode", label: () => "opencode" },
 ];
 
 const DATE_RANGES = [

@@ -485,12 +485,12 @@ export function ProfileContent({ data, currency, rate, onClose, variant = "modal
             label={copy("leaderboard.profile_modal.stat.total_tokens")}
           />
           <Stat
-            value={formatCostCompact(totals?.estimated_cost_usd, currency, rate)}
-            label={copy("leaderboard.profile_modal.stat.total_cost")}
-          />
-          <Stat
             value={String(totals?.active_days ?? 0)}
             label={copy("leaderboard.profile_modal.stat.active_days")}
+          />
+          <Stat
+            value={formatCostCompact(totals?.estimated_cost_usd, currency, rate)}
+            label={copy("leaderboard.profile_modal.stat.total_cost")}
           />
           <Stat
             value={formatCostCompact(totals?.avg_per_day_usd, currency, rate)}

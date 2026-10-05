@@ -298,6 +298,7 @@ export function usageLimitsLabelCopyAnchor() {
     copy("limits.label.qoder_cn_ultimate"),
     copy("limits.label.command_code_5h"),
     copy("limits.label.command_code_weekly"),
+    copy("limits.label.command_code_monthly"),
     copy("limits.label.ark_coding_plan_5h"),
     copy("limits.label.ark_coding_plan_weekly"),
     copy("limits.label.ark_coding_plan_monthly"),

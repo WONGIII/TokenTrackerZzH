@@ -817,3 +817,54 @@ describe("commandCode monthly row in getUsageLimits", () => {
     }
   });
 });
+
+it("builds a valid usage URL for accounts without an org", async () => {
+  // Regression: withOrgParam returns the route unchanged when the account has no org
+  // (personal plans), so an unconditional "&since=" produced
+  // "/alpha/usage/summary&since=..." — a malformed path. The request failed, the
+  // best-effort catch swallowed it, and the monthly row silently disappeared for
+  // exactly the accounts that have no org.
+  const { tmp, home } = makeAuthHome({ apiKey: "k-personal-usage" });
+  try {
+    const urls = [];
+    const out = await fetchCommandcodeLimits({
+      home,
+      env: {},
+      fetchImpl: async (url) => {
+        urls.push(String(url));
+        const u = String(url);
+        if (u.includes("/alpha/whoami")) {
+          return jsonResponse(200, { data: { user: { userName: "dev" } } });
+        }
+        if (u.includes("/alpha/billing/credits")) {
+          return jsonResponse(200, creditsPayload());
+        }
+        if (u.includes("/alpha/billing/subscriptions")) {
+          return jsonResponse(200, {
+            data: {
+              planId: "individual-goat",
+              status: "active",
+              currentPeriodStart: "2026-09-22T14:33:36.000Z",
+              currentPeriodEnd: "2026-10-22T14:33:36.000Z",
+            },
+          });
+        }
+        if (u.includes("/alpha/usage/summary")) {
+          return jsonResponse(200, { totalCost: 18.225 });
+        }
+        return jsonResponse(404, {});
+      },
+    });
+    const usageUrl = urls.find((u) => u.includes("/alpha/usage/summary"));
+    assert.ok(usageUrl, "the usage summary must be requested");
+    assert.match(usageUrl, /\/alpha\/usage\/summary\?since=/);
+    assert.ok(!usageUrl.includes("summary&since"));
+    // and the row it feeds actually appears
+    // 18.225 spent against a pool of 18.225 + 85 remaining.
+    assert.ok(Math.abs(out.tertiary_window.used_percent - 17.66) < 0.05);
+    assert.equal(out.tertiary_window.reset_at, "2026-10-22T14:33:36.000Z");
+    assert.equal(out.credits_used, 18.225);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});

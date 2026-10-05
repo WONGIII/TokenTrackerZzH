@@ -362,10 +362,17 @@ async function fetchCommandcodeLimits({
   // take down a card whose windows were already fetched successfully. Without it the
   // monthly row is simply omitted.
   let usedCost = null;
+  let usageError = null;
   try {
     const since = periodStart || `${new Date().toISOString().slice(0, 7)}-01T00:00:00.000Z`;
+    // withOrgParam returns the route untouched when the account has no org (personal
+    // plans), so the separator has to depend on whether a query string is already
+    // there — hardcoding "&" produced ".../usage/summary&since=..." and the request
+    // silently failed for exactly those accounts.
+    const usageRoute = withOrgParam("/alpha/usage/summary", orgId);
+    const usageUrl = `${origin}${usageRoute}${usageRoute.includes("?") ? "&" : "?"}since=${encodeURIComponent(since)}`;
     const usageBody = await fetchCommandcodeJson({
-      url: `${origin}${withOrgParam("/alpha/usage/summary", orgId)}&since=${encodeURIComponent(since)}`,
+      url: usageUrl,
       apiKey,
       fetchImpl,
       label: "usage summary",
@@ -373,8 +380,12 @@ async function fetchCommandcodeLimits({
     usedCost = normalizeCommandcodeCost(
       usageBody?.totalCost ?? usageBody?.data?.totalCost,
     );
-  } catch (_error) {
+  } catch (error) {
+    // Best-effort by design (a plan without API access answers 403, a busy key 429),
+    // but kept on the result so a missing monthly row can be explained rather than
+    // guessed at.
     usedCost = null;
+    usageError = error?.message || "usage summary unavailable";
   }
   const monthlyWindow = buildCommandcodeMonthlyWindow({
     credits,
@@ -396,6 +407,7 @@ async function fetchCommandcodeLimits({
     tertiary_window: monthlyWindow,
     credits,
     credits_used: usedCost,
+    credits_used_error: usageError,
     stale: false,
     cached_at: new Date().toISOString(),
   };

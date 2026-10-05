@@ -787,5 +787,7 @@
   "settings.account.avatar": "頭像圖片 URL",
   "settings.account.avatarHint": "貼上一張圖片的連結（https）",
   "settings.account.avatarPlaceholder": "https://example.com/me.png",
-  "settings.account.avatarInvalid": "請填寫 http(s) 開頭的圖片網址。"
+  "settings.account.avatarInvalid": "請填寫 http(s) 開頭的圖片網址。",
+  "limits.label.commandcode_credits_remaining": "月度剩餘額度 {{credits}} credits",
+  "limits.label.commandcode_credits_breakdown": "（月 {{monthly}} · 購買 {{purchased}} · 贈送 {{free}}）"
 }

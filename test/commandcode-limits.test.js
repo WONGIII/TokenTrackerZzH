@@ -12,6 +12,7 @@ const {
   deriveCommandcodePlanLabel,
   normalizeResetAt,
   normalizeCommandcodeWindowLimits,
+  normalizeCommandcodeCredits,
 } = require("../src/lib/commandcode-limits");
 const {
   getUsageLimits,
@@ -598,4 +599,71 @@ describe("resolveCommandcodeOrigin", () => {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
+});
+
+
+describe("normalizeCommandcodeCredits", () => {
+  it("sums the remaining balances the credits payload reports", () => {
+    assert.deepEqual(
+      normalizeCommandcodeCredits({
+        monthlyCredits: 40,
+        purchasedCredits: 10,
+        freeCredits: 5,
+      }),
+      { monthly: 40, purchased: 10, free: 5, remaining: 55 },
+    );
+  });
+
+  it("tolerates numeric strings and missing fields", () => {
+    // An undocumented alpha endpoint can hand back either spelling of "number".
+    assert.deepEqual(normalizeCommandcodeCredits({ monthlyCredits: "40" }), {
+      monthly: 40,
+      purchased: null,
+      free: null,
+      remaining: 40,
+    });
+  });
+
+  it("stays unknown rather than reporting a zero balance", () => {
+    for (const raw of [null, undefined, {}, { monthlyCredits: null }]) {
+      assert.equal(normalizeCommandcodeCredits(raw), null);
+    }
+    // A real zero is a number, not a miss.
+    assert.equal(normalizeCommandcodeCredits({ monthlyCredits: 0 }).remaining, 0);
+  });
+});
+
+it("exposes the credits balance alongside the 5h and weekly windows", async () => {
+  const { tmp, home } = makeAuthHome({ apiKey: "k-credits" });
+  try {
+    const out = await fetchCommandcodeLimits({
+      home,
+      env: {},
+      fetchImpl: async (url) => {
+        const u = String(url);
+        if (u.includes("/alpha/whoami")) {
+          return jsonResponse(200, { data: { org: { id: "org-9" } } });
+        }
+        if (u.includes("/alpha/billing/credits")) {
+          return jsonResponse(200, creditsPayload());
+        }
+        if (u.includes("/alpha/billing/subscriptions")) {
+          return jsonResponse(200, { data: { planId: "individual-goat", status: "active" } });
+        }
+        return jsonResponse(404, {});
+      },
+    });
+    // creditsPayload() grants 80 monthly + 5 purchased and no free credits.
+    assert.deepEqual(out.credits, {
+      monthly: 80,
+      purchased: 5,
+      free: null,
+      remaining: 85,
+    });
+    // The windows are untouched by the balance: they pace it rather than cap it.
+    assert.ok(out.primary_window);
+    assert.ok(out.secondary_window);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });

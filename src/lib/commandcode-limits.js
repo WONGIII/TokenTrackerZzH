@@ -160,6 +160,34 @@ function deriveCommandcodePlanLabel(rawPlanId) {
   return null;
 }
 
+// The credits payload's own `credits` object holds the account's remaining balances:
+// the monthly allowance, purchased top-ups and free grants. It is the ONLY place a
+// monthly figure exists — windowLimits merely paces those credits through the rolling
+// 5h and weekly windows — so the panel surfaces the sum as the remaining monthly
+// allowance. Values arrive as numbers, but strings are tolerated because this is an
+// undocumented alpha endpoint whose schema can drift.
+function normalizeCommandcodeCredits(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const pick = (key) => {
+    const value = raw[key];
+    if (value === null || value === undefined || value === "") return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  };
+  const monthly = pick("monthlyCredits");
+  const purchased = pick("purchasedCredits");
+  const free = pick("freeCredits");
+  if (monthly === null && purchased === null && free === null) return null;
+  return {
+    monthly,
+    purchased,
+    free,
+    // A sum of what is left, not a cap: the API reports balances here and usage
+    // separately, so there is no denominator to draw a progress bar with.
+    remaining: (monthly || 0) + (purchased || 0) + (free || 0),
+  };
+}
+
 function normalizeCommandcodeWindowLimits(windowLimits) {
   if (!windowLimits || typeof windowLimits !== "object") return null;
   const fiveHour = normalizeCommandcodeWindow(
@@ -284,6 +312,7 @@ async function fetchCommandcodeLimits({
   if (!windows) {
     throw new Error("CommandCode credits response is missing windowLimits.");
   }
+  const credits = normalizeCommandcodeCredits(creditsBody?.credits);
   const subscription = subscriptionBody?.data ?? subscriptionBody ?? null;
   const planId = isNonEmptyString(subscription?.planId)
     ? subscription.planId.trim()
@@ -298,6 +327,7 @@ async function fetchCommandcodeLimits({
       : null,
     primary_window: windows.fiveHour,
     secondary_window: windows.weekly,
+    credits,
     stale: false,
     cached_at: new Date().toISOString(),
   };
@@ -315,6 +345,7 @@ module.exports = {
   normalizeResetAt,
   normalizeCommandcodeWindow,
   normalizeCommandcodeWindowLimits,
+  normalizeCommandcodeCredits,
   resolveCommandcodeOrigin,
   fetchCommandcodeLimits,
 };

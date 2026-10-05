@@ -1699,3 +1699,5 @@ achievements.badge.root_of_all_evil.name,dashboard,*,AchievementsSection,root_of
 achievements.badge.root_of_all_evil.desc,dashboard,*,BadgeDetailModal,root_of_all_evil_desc,"Before the dawn of the compute era it arrived quietly — no thunder, no oracle, just a gentle hello. That greeting tore the hardware market off its axis: it lit the spark under graphics cards, woke the memory frenzy, and burned solid-state drives to ash in the blaze of demand. Later ages called it the root of all evil. And you spoke with it. Every call signed your name in the book of original sin; every reply dropped a ripple into the sea of compute. The patient lost their dawn, builders lost their budget, and silicon met its first great inflation.
 
 Unlocks by spending Tokens on the GPT-3.5 series.",,active
+limits.label.commandcode_credits_remaining,ui,LimitsPage,UsageLimitsPanel,commandcode_credits_remaining,"Remaining monthly credits: {{credits}} credits",,active
+limits.label.commandcode_credits_breakdown,ui,LimitsPage,UsageLimitsPanel,commandcode_credits_breakdown,"(monthly {{monthly}} · purchased {{purchased}} · free {{free}})",,active

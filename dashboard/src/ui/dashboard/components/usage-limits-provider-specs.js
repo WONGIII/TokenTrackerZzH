@@ -217,6 +217,10 @@ export const PROVIDER_LIMIT_SPECS = {
         { key: "weekly", labelKey: "limits.label.command_code_weekly", window: data.secondary_window },
       ];
     },
+    // The 5h/weekly windows pace the plan's monthly credits; the remaining
+    // balance itself lives in the credits payload, so it renders as a line
+    // rather than a window (there is no cap to draw a bar against).
+    extra: "commandcode_credits",
   },
   agentPlan: {
     // Volcano Ark Agent Plan quota refreshes on three windows: a rolling

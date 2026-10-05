@@ -574,6 +574,25 @@ function renderProviderExtra(kind, data) {
     const resetModel = buildResetBankRows(data.reset_credits);
     return resetModel ? <ResetBankSection model={resetModel} /> : null;
   }
+  if (kind === "commandcode_credits" && data.credits) {
+    const { monthly, purchased, free, remaining } = data.credits;
+    if (Number.isFinite(Number(remaining))) {
+      const fmt = (value) => formatCreditAmount(value, { maximumFractionDigits: 2 });
+      return (
+        <StatusLine>
+          {copy("limits.label.commandcode_credits_remaining", { credits: fmt(remaining) })}
+          {Number(purchased) > 0 || Number(free) > 0
+            ? " " +
+              copy("limits.label.commandcode_credits_breakdown", {
+                monthly: Number.isFinite(Number(monthly)) ? fmt(monthly) : "0",
+                purchased: Number.isFinite(Number(purchased)) ? fmt(purchased) : "0",
+                free: Number.isFinite(Number(free)) ? fmt(free) : "0",
+              })
+            : ""}
+        </StatusLine>
+      );
+    }
+  }
   if (kind === "kimi_parallel" && data.parallel_limit) {
     return <StatusLine>{copy("limits.label.kimi_parallel", { count: data.parallel_limit })}</StatusLine>;
   }

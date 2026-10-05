@@ -13,6 +13,8 @@ const {
   normalizeResetAt,
   normalizeCommandcodeWindowLimits,
   normalizeCommandcodeCredits,
+  normalizeCommandcodeCost,
+  buildCommandcodeMonthlyWindow,
 } = require("../src/lib/commandcode-limits");
 const {
   getUsageLimits,
@@ -448,6 +450,8 @@ describe("commandCode in getUsageLimits", () => {
     credits = creditsPayload(),
     subscription = { data: { planId: "individual-goat", status: "active" } },
     whoami = { data: { org: { id: "org-7" } } },
+    usage = { totalCost: 30 },
+    usageStatus = 200,
     status = 200,
   } = {}) {
     return async (url) => {
@@ -462,6 +466,11 @@ describe("commandCode in getUsageLimits", () => {
       }
       if (u.includes("api.commandcode.ai/alpha/billing/subscriptions")) {
         return jsonResponse(200, subscription);
+      }
+      if (u.includes("api.commandcode.ai/alpha/usage/summary")) {
+        return usageStatus === 200
+          ? jsonResponse(200, usage)
+          : jsonResponse(usageStatus, {});
       }
       return jsonResponse(404, {});
     };
@@ -666,4 +675,145 @@ it("exposes the credits balance alongside the 5h and weekly windows", async () =
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+describe("buildCommandcodeMonthlyWindow", () => {
+  it("reconstructs the pool as spent plus remaining", () => {
+    const window = buildCommandcodeMonthlyWindow({
+      credits: { remaining: 85 },
+      usedCost: 15,
+      periodStart: null,
+      periodEnd: null,
+    });
+    assert.equal(window.used_percent, 15);
+    assert.equal(window.reset_at, null);
+    // Without billing-period dates the documented 30-day length stands in.
+    assert.equal(window.limit_window_seconds, 30 * 24 * 60 * 60);
+  });
+
+  it("uses the billing period for the length and the reset time", () => {
+    const window = buildCommandcodeMonthlyWindow({
+      credits: { remaining: 85 },
+      usedCost: 30,
+      periodStart: "2026-10-01T00:00:00.000Z",
+      periodEnd: "2026-11-01T00:00:00.000Z",
+    });
+    assert.ok(Math.abs(window.used_percent - 26.09) < 0.01);
+    assert.equal(window.reset_at, "2026-11-01T00:00:00.000Z");
+    assert.equal(window.limit_window_seconds, 31 * 24 * 60 * 60);
+  });
+
+  it("stays null rather than drawing a fabricated bar", () => {
+    assert.equal(buildCommandcodeMonthlyWindow({ credits: { remaining: 85 }, usedCost: null }), null);
+    assert.equal(buildCommandcodeMonthlyWindow({ credits: null, usedCost: 5 }), null);
+    assert.equal(buildCommandcodeMonthlyWindow({ credits: { remaining: 0 }, usedCost: 0 }), null);
+  });
+
+  it("reads the spend from either numeric shape", () => {
+    assert.equal(normalizeCommandcodeCost(12.5), 12.5);
+    assert.equal(normalizeCommandcodeCost("12.5"), 12.5);
+    assert.equal(normalizeCommandcodeCost(null), null);
+    assert.equal(normalizeCommandcodeCost("abc"), null);
+  });
+});
+
+describe("commandCode monthly row in getUsageLimits", () => {
+  function monthlyFetchImpl(overrides = {}) {
+    return async (url) => {
+      const u = String(url);
+      if (u.includes("/alpha/whoami")) return jsonResponse(200, { data: { org: { id: "org-m" } } });
+      if (u.includes("/alpha/billing/credits")) {
+        return jsonResponse(200, {
+          credits: { monthlyCredits: 80, purchasedCredits: 5 },
+          windowLimits: {
+            limited: true,
+            fiveHour: { used: 8, cap: 16, resetAt: 1_800_000_000_000 },
+            weekly: { used: 20, cap: 40, resetAt: 1_860_000_000_000 },
+          },
+        });
+      }
+      if (u.includes("/alpha/billing/subscriptions")) {
+        return jsonResponse(200, {
+          data: {
+            planId: "individual-goat",
+            status: "active",
+            currentPeriodStart: "2026-10-01T00:00:00.000Z",
+            currentPeriodEnd: "2026-11-01T00:00:00.000Z",
+          },
+        });
+      }
+      if (u.includes("/alpha/usage/summary")) {
+        if (overrides.usageStatus && overrides.usageStatus !== 200) {
+          return jsonResponse(overrides.usageStatus, {});
+        }
+        return jsonResponse(200, { totalCost: overrides.totalCost ?? 30 });
+      }
+      return jsonResponse(404, {});
+    };
+  }
+
+  it("reports the monthly window with its percentage and reset time", async () => {
+    resetUsageLimitsCache();
+    const { tmp, home } = makeAuthHome({ apiKey: "k-monthly" });
+    try {
+      const data = await getUsageLimits({
+        home,
+        env: {},
+        platform: "linux",
+        providerTimeoutMs: 1500,
+        commandRunner() {
+          return { status: 1, stdout: "" };
+        },
+        requestFn() {
+          throw new Error("no local requests");
+        },
+        securityRunner() {
+          return { status: 1, stdout: "" };
+        },
+        fetchImpl: monthlyFetchImpl(),
+      });
+      const cc = data.commandCode;
+      // Spent 30 out of the 30 + 85 credits the plan can draw on.
+      assert.ok(Math.abs(cc.tertiary_window.used_percent - 26.09) < 0.01);
+      assert.equal(cc.tertiary_window.reset_at, "2026-11-01T00:00:00.000Z");
+      assert.equal(cc.credits_used, 30);
+      // The two paced windows are untouched.
+      assert.equal(cc.primary_window.used_percent, 50);
+      assert.equal(cc.secondary_window.used_percent, 50);
+    } finally {
+      resetUsageLimitsCache();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("omits the monthly row when the spend figure is unavailable", async () => {
+    resetUsageLimitsCache();
+    const { tmp, home } = makeAuthHome({ apiKey: "k-nousage" });
+    try {
+      const data = await getUsageLimits({
+        home,
+        env: {},
+        platform: "linux",
+        providerTimeoutMs: 1500,
+        commandRunner() {
+          return { status: 1, stdout: "" };
+        },
+        requestFn() {
+          throw new Error("no local requests");
+        },
+        securityRunner() {
+          return { status: 1, stdout: "" };
+        },
+        fetchImpl: monthlyFetchImpl({ usageStatus: 403 }),
+      });
+      const cc = data.commandCode;
+      // A plan without API access must not lose the card it already has.
+      assert.equal(cc.tertiary_window, null);
+      assert.ok(cc.primary_window);
+      assert.equal(cc.credits.remaining, 85);
+    } finally {
+      resetUsageLimitsCache();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });

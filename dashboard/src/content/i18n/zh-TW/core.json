@@ -789,5 +789,6 @@
   "settings.account.avatarPlaceholder": "https://example.com/me.png",
   "settings.account.avatarInvalid": "請填寫 http(s) 開頭的圖片網址。",
   "limits.label.commandcode_credits_remaining": "月度剩餘額度 {{credits}} credits",
-  "limits.label.commandcode_credits_breakdown": "（月 {{monthly}} · 購買 {{purchased}} · 贈送 {{free}}）"
+  "limits.label.commandcode_credits_breakdown": "（月 {{monthly}} · 購買 {{purchased}} · 贈送 {{free}}）",
+  "limits.label.command_code_monthly": "月度"
 }

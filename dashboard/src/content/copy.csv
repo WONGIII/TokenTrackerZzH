@@ -1701,3 +1701,4 @@ achievements.badge.root_of_all_evil.desc,dashboard,*,BadgeDetailModal,root_of_al
 Unlocks by spending Tokens on the GPT-3.5 series.",,active
 limits.label.commandcode_credits_remaining,ui,LimitsPage,UsageLimitsPanel,commandcode_credits_remaining,"Remaining monthly credits: {{credits}} credits",,active
 limits.label.commandcode_credits_breakdown,ui,LimitsPage,UsageLimitsPanel,commandcode_credits_breakdown,"(monthly {{monthly}} · purchased {{purchased}} · free {{free}})",,active
+limits.label.command_code_monthly,ui,LimitsPage,UsageLimitsPanel,command_code_monthly,"Monthly",,active

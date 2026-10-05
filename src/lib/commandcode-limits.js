@@ -36,6 +36,9 @@ const COMMANDCODE_AUTH_FILENAME = "auth.json";
 // (https://commandcode.ai/docs/resources/usage-limits): 5h + 7d.
 const COMMANDCODE_SESSION_WINDOW_SECONDS = 5 * 60 * 60;
 const COMMANDCODE_WEEKLY_WINDOW_SECONDS = 7 * 24 * 60 * 60;
+// The plan's monthly allowance resets with the billing period, whose real length comes
+// from the subscription payload; 30 days is the fallback when that is missing.
+const COMMANDCODE_MONTHLY_WINDOW_SECONDS = 30 * 24 * 60 * 60;
 
 function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
@@ -188,6 +191,40 @@ function normalizeCommandcodeCredits(raw) {
   };
 }
 
+// Amount spent inside the current billing period, as reported by
+// /alpha/usage/summary. Numbers arrive as numbers in the documented shape, but a
+// string is tolerated for the same reason the balances tolerate one.
+function normalizeCommandcodeCost(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+// The monthly row the panel draws as a third window. The API never reports a
+// monthly "used / cap" pair: the balance lives in the credits object and the spend
+// lives in the usage summary, so the cap is reconstructed as spent + remaining —
+// which is exactly the pool the plan draws down. Unknown inputs yield null and the
+// card falls back to the balance line rather than drawing a fabricated bar.
+function buildCommandcodeMonthlyWindow({ credits, usedCost, periodStart, periodEnd } = {}) {
+  const used = normalizeCommandcodeCost(usedCost);
+  const remaining = credits && Number.isFinite(Number(credits.remaining))
+    ? Number(credits.remaining)
+    : null;
+  if (used === null || remaining === null) return null;
+  const pool = used + remaining;
+  if (!(pool > 0)) return null;
+  const startMs = Date.parse(normalizeResetAt(periodStart) || "");
+  const endMs = Date.parse(normalizeResetAt(periodEnd) || "");
+  const windowSeconds = Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs
+    ? Math.round((endMs - startMs) / 1000)
+    : COMMANDCODE_MONTHLY_WINDOW_SECONDS;
+  return buildWindow({
+    usedPercent: (used / pool) * 100,
+    resetAt: normalizeResetAt(periodEnd),
+    windowSeconds,
+  });
+}
+
 function normalizeCommandcodeWindowLimits(windowLimits) {
   if (!windowLimits || typeof windowLimits !== "object") return null;
   const fiveHour = normalizeCommandcodeWindow(
@@ -317,6 +354,34 @@ async function fetchCommandcodeLimits({
   const planId = isNonEmptyString(subscription?.planId)
     ? subscription.planId.trim()
     : null;
+  const periodStart = normalizeResetAt(subscription?.currentPeriodStart);
+  const periodEnd = normalizeResetAt(subscription?.currentPeriodEnd);
+
+  // The spend figure lives in a separate endpoint, so it is best-effort: a plan
+  // without API access answers 403 and a busy key answers 429, and neither should
+  // take down a card whose windows were already fetched successfully. Without it the
+  // monthly row is simply omitted.
+  let usedCost = null;
+  try {
+    const since = periodStart || `${new Date().toISOString().slice(0, 7)}-01T00:00:00.000Z`;
+    const usageBody = await fetchCommandcodeJson({
+      url: `${origin}${withOrgParam("/alpha/usage/summary", orgId)}&since=${encodeURIComponent(since)}`,
+      apiKey,
+      fetchImpl,
+      label: "usage summary",
+    });
+    usedCost = normalizeCommandcodeCost(
+      usageBody?.totalCost ?? usageBody?.data?.totalCost,
+    );
+  } catch (_error) {
+    usedCost = null;
+  }
+  const monthlyWindow = buildCommandcodeMonthlyWindow({
+    credits,
+    usedCost,
+    periodStart,
+    periodEnd,
+  });
 
   return {
     configured: true,
@@ -327,7 +392,10 @@ async function fetchCommandcodeLimits({
       : null,
     primary_window: windows.fiveHour,
     secondary_window: windows.weekly,
+    // Same slot agentPlan uses for its monthly window.
+    tertiary_window: monthlyWindow,
     credits,
+    credits_used: usedCost,
     stale: false,
     cached_at: new Date().toISOString(),
   };
@@ -346,6 +414,8 @@ module.exports = {
   normalizeCommandcodeWindow,
   normalizeCommandcodeWindowLimits,
   normalizeCommandcodeCredits,
+  normalizeCommandcodeCost,
+  buildCommandcodeMonthlyWindow,
   resolveCommandcodeOrigin,
   fetchCommandcodeLimits,
 };

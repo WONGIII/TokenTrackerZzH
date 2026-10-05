@@ -574,7 +574,9 @@ function renderProviderExtra(kind, data) {
     const resetModel = buildResetBankRows(data.reset_credits);
     return resetModel ? <ResetBankSection model={resetModel} /> : null;
   }
-  if (kind === "commandcode_credits" && data.credits) {
+  // Only a fallback: once the monthly row exists it carries the figure, and showing
+  // both would state the balance twice.
+  if (kind === "commandcode_credits" && data.credits && !data.tertiary_window) {
     const { monthly, purchased, free, remaining } = data.credits;
     if (Number.isFinite(Number(remaining))) {
       const fmt = (value) => formatCreditAmount(value, { maximumFractionDigits: 2 });

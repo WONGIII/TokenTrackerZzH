@@ -848,5 +848,6 @@
   "settings.account.avatarPlaceholder": "https://example.com/me.png",
   "settings.account.avatarInvalid": "请填写 http(s) 开头的图片地址。",
   "limits.label.commandcode_credits_remaining": "月度剩余额度 {{credits}} credits",
-  "limits.label.commandcode_credits_breakdown": "（月 {{monthly}} · 购买 {{purchased}} · 赠送 {{free}}）"
+  "limits.label.commandcode_credits_breakdown": "（月 {{monthly}} · 购买 {{purchased}} · 赠送 {{free}}）",
+  "limits.label.command_code_monthly": "月度"
 }

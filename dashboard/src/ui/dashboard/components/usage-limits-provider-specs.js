@@ -211,15 +211,17 @@ export const PROVIDER_LIMIT_SPECS = {
     // CommandCode subscription: 5h + weekly rolling windows over included
     // monthly credits. Server-defined caps (client-trusted used% only), so no
     // windowSeconds-based pacing projection — mirrors opencodeGo.
+    // The plan's allowance is monthly and the 5h/weekly windows pace it. The API
+    // reports the spend and the remaining balance separately, so the monthly row is
+    // reconstructed server-side into the same window shape; when that figure is
+    // unavailable the card falls back to the plain balance line below.
     windows(data) {
       return [
         { key: "5h", labelKey: "limits.label.command_code_5h", window: data.primary_window },
         { key: "weekly", labelKey: "limits.label.command_code_weekly", window: data.secondary_window },
+        { key: "monthly", labelKey: "limits.label.command_code_monthly", window: data.tertiary_window },
       ];
     },
-    // The 5h/weekly windows pace the plan's monthly credits; the remaining
-    // balance itself lives in the credits payload, so it renders as a line
-    // rather than a window (there is no cap to draw a bar against).
     extra: "commandcode_credits",
   },
   agentPlan: {

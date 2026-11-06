@@ -36,6 +36,9 @@ const SOURCE_FILTERS = [
   { id: "astrbot", label: () => "AstrBot" },
   { id: "openbitfun", label: () => "OpenBitFun" },
   { id: "zcode", label: () => "ZCode" },
+  // wcode shipped after ZCode and is a different product, so it sits beside it
+  // rather than in a shared bucket.
+  { id: "wcode", label: () => "wcode" },
   { id: "opencode", label: () => "opencode" },
 ];
 

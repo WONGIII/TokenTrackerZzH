@@ -85,6 +85,7 @@ const PROVIDER_COLORS = {
   MIMO: "#ff6900",         // Xiaomi MiMo brand orange
   DROID: "#ef4444",        // red-500 (Factory brand)
   ZCODE: "#14b8a6",        // teal-500 (Z.ai / GLM — distinct from the blues)
+  WCODE: "var(--provider-wcode)", // violet-500 token, kept apart from ZCode's teal
   ANYTHINGLLM: "var(--provider-anythingllm)", // AnythingLLM primary cyan
   LMSTUDIO: "var(--provider-lmstudio)", // LM Studio icon gradient lead
   UNSLOTH: "var(--provider-unsloth)",  // Unsloth green

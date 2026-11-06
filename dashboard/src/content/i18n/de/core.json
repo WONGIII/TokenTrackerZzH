@@ -598,5 +598,6 @@
   "settings.account.avatar": "Avatar-Bild-URL",
   "settings.account.avatarHint": "Link zu einem Bild einfügen (https)",
   "settings.account.avatarPlaceholder": "https://example.com/me.png",
-  "settings.account.avatarInvalid": "Bitte eine http(s)-Bild-URL angeben."
+  "settings.account.avatarInvalid": "Bitte eine http(s)-Bild-URL angeben.",
+  "provider.display.wcode": "wcode"
 }

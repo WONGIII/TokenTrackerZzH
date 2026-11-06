@@ -5,7 +5,7 @@ const fssync = require("node:fs");
 const cp = require("node:child_process");
 const readline = require("node:readline");
 
-const { resolveInstallPaths, resolveZcodeNativeDbPath, ensureFlatCursor } = require("../lib/install-resolver");
+const { resolveInstallPaths, resolveZcodeNativeDbPath, resolveWcodeNativeDbPath, ensureFlatCursor } = require("../lib/install-resolver");
 const { multiInstallParse, mergeBothFileSources } = require("../lib/multi-install-parser");
 const wsl = require("../lib/wsl-probe");
 const {
@@ -30,6 +30,7 @@ const {
   readOpencodeDbMessagesIncremental,
   readMimoDbMessages,
   readZcodeDbMessages,
+  readWcodeDbMessages,
   hasZcodeNativeUsageSchema,
   resolveQoderDbPaths,
   resolveQoderCnDbPaths,
@@ -328,6 +329,7 @@ const AUTO_SYNC_SOURCES = new Set([
   "roocode",
   "trae-cn",
   "unsloth",
+  "wcode",
   "workbuddy",
   "zcode",
   "zed",
@@ -1593,6 +1595,30 @@ async function cmdSync(argv, context = {}) {
             queuePath, projectQueuePath, onProgress: makeProviderProgress("ZCode"),
           });
         } catch (err) { warnProviderParseFailure("ZCode", err, opts); }
+      }
+    }
+
+    // ── wcode (a separate OpenCode-derived agent with its own data root) ──
+    // Same parser and cursor discipline as ZCode above: one install, one SQLite
+    // database, its own source label. Nothing is shared with the ZCode block
+    // beyond the reader's internal merge rule, so a machine running only one of
+    // the two behaves exactly like a machine running only that one.
+    let wcodeResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    if (sourceAllowed("wcode")) {
+      const wcodeNativeValue = resolveWcodeNativeDbPath({ home });
+      const wslWcodeDir = process.platform === "win32" && wsl.shouldProbeWsl(process.env)
+        ? wsl.discoverWslHome(".wcode")
+        : null;
+      const wcodePaths = resolveInstallPaths({ nativeValue: wcodeNativeValue, wslValue: wslWcodeDir ? path.join(wslWcodeDir, "cli", "db", "db.sqlite") : null });
+      if (wcodePaths.native || wcodePaths.wsl) {
+        if (progress?.enabled) progress.start(`Parsing wcode ${renderBar(0)} | buckets 0`);
+        try {
+          wcodeResult = await multiInstallParse({
+            paths: wcodePaths, parserFn: parseOpencodeDbForInstall, providerName: "wcode",
+            cursors, getParams: (p) => ({ dbPath: p, readFn: readWcodeDbMessages, source: "wcode", cursorKey: "wcode" }),
+            queuePath, projectQueuePath, onProgress: makeProviderProgress("wcode"),
+          });
+        } catch (err) { warnProviderParseFailure("wcode", err, opts); }
       }
     }
 
@@ -3062,6 +3088,7 @@ async function cmdSync(argv, context = {}) {
       kiloResult.recordsProcessed +
       mimoResult.recordsProcessed +
       zcodeResult.recordsProcessed +
+      wcodeResult.recordsProcessed +
       kilocodeResult.recordsProcessed +
       roocodeResult.recordsProcessed +
       zedResult.recordsProcessed +
@@ -3104,6 +3131,7 @@ async function cmdSync(argv, context = {}) {
       kiloResult.bucketsQueued +
       mimoResult.bucketsQueued +
       zcodeResult.bucketsQueued +
+      wcodeResult.bucketsQueued +
       kilocodeResult.bucketsQueued +
       roocodeResult.bucketsQueued +
       zedResult.bucketsQueued +

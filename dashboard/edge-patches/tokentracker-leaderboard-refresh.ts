@@ -603,6 +603,9 @@ const SOURCE_COLUMN_MAP: Record<string, string> = {
   // saw the generic "Other" column as their biggest provider while the
   // dashboard listed ZCode by name.
   zcode: "zcode_tokens",
+  // wcode writes source "wcode". Its own column keeps this agent out of
+  // other_tokens, the same reason every other first-class source has one.
+  wcode: "wcode_tokens",
 };
 
 interface DateRange {

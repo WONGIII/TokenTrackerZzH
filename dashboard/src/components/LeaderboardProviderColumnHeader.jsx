@@ -20,6 +20,9 @@ const INVERT_IN_DARK = new Set([
   // The ZCode mark is `fill="currentColor"` with no colour of its own, so at the
   // <img> boundary it renders solid black too — same inversion as OpenBitFun.
   "/brand-logos/zcode.svg",
+  // wcode's mark is drawn the same way — a currentColor glyph with no colour of
+  // its own — so an image boundary renders it solid black too.
+  "/brand-logos/wcode.svg",
 ]);
 
 /**

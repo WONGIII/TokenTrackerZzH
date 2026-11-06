@@ -601,5 +601,6 @@
   "settings.account.avatar": "アバター画像 URL",
   "settings.account.avatarHint": "画像のリンク（https）を貼り付けてください",
   "settings.account.avatarPlaceholder": "https://example.com/me.png",
-  "settings.account.avatarInvalid": "http(s) で始まる画像 URL を入力してください。"
+  "settings.account.avatarInvalid": "http(s) で始まる画像 URL を入力してください。",
+  "provider.display.wcode": "wcode"
 }

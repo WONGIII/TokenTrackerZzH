@@ -112,7 +112,7 @@ const {
 } = require("../lib/trae-cn-config");
 const wsl = require("../lib/wsl-probe");
 const { getWslMode, isInvalidWslMode, shouldProbeWsl, discoverWslHome } = wsl;
-const { resolveInstallPaths, resolveZcodeNativeDbPath } = require("../lib/install-resolver");
+const { resolveInstallPaths, resolveZcodeNativeDbPath, resolveWcodeNativeDbPath } = require("../lib/install-resolver");
 const { probeGrokHookState, resolveGrokHome } = require("../lib/grok-hook");
 const { probeOmpHookState } = require("../lib/omp-hook");
 
@@ -508,6 +508,16 @@ async function cmdStatus(argv = []) {
   const mimoActive = formatResolvedPaths(mimoPaths);
   const mimoInstalled = mimoActive.length > 0;
   const mimoDbPath = mimoActive.join(" | ");
+
+  // wcode — a separate OpenCode-derived agent with its own home — passive scan.
+  const wcodeNativeValue = resolveWcodeNativeDbPath({ home });
+  const wslWcodeDir = process.platform === "win32" && wsl.shouldProbeWsl(process.env)
+    ? wsl.discoverWslHome(".wcode")
+    : null;
+  const wcodePaths = resolveInstallPaths({ nativeValue: wcodeNativeValue, wslValue: wslWcodeDir ? path.join(wslWcodeDir, "cli", "db", "db.sqlite") : null });
+  const wcodeActive = formatResolvedPaths(wcodePaths);
+  const wcodeInstalled = wcodeActive.length > 0;
+  const wcodeDbPath = wcodeActive.join(" | ");
 
   // ZCode (Z.ai's coding agent — OpenCode-fork SQLite) — passive scan of db.sqlite.
   const zcodeNativeValue = resolveZcodeNativeDbPath({ home });
@@ -1039,6 +1049,9 @@ async function cmdStatus(argv = []) {
         mimo: mimoInstalled
           ? { installed: true, detail: mimoDbPath }
           : { installed: false },
+        wcode: wcodeInstalled
+          ? { installed: true, detail: wcodeDbPath }
+          : { installed: false },
         zcode: zcodeInstalled
           ? { installed: true, detail: zcodeDbPath }
           : { installed: false },
@@ -1221,6 +1234,9 @@ async function cmdStatus(argv = []) {
         : null,
       mimoInstalled
         ? `- Mimo: passive reader (${mimoDbPath})`
+        : null,
+      wcodeInstalled
+        ? `- wcode: passive reader (${wcodeDbPath})`
         : null,
       zcodeInstalled
         ? `- ZCode: passive reader (${zcodeDbPath})`

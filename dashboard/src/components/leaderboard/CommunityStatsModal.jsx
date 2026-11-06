@@ -40,6 +40,7 @@ const PROVIDER_BAR_COLORS = {
   GROK: "var(--community-grok)",
   DEEPSEEK: "var(--community-deepseek)",
   ZCODE: "var(--community-zcode)",
+  WCODE: "var(--community-wcode)",
   WORKBUDDY: "var(--community-workbuddy)",
   MINIMAX: "var(--community-minimax)",
   DROID: "var(--community-droid)",

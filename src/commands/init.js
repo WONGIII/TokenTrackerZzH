@@ -75,6 +75,7 @@ const {
   resolveAstrBotDbPaths,
   resolveOpenBitFunHomes,
   resolveZcodeDbPaths,
+  resolveWcodeDbPaths,
   resolveDevinDbPath,
   resolveReasonixHome,
   resolveTraeStoragePath,
@@ -952,6 +953,19 @@ async function applyIntegrationSetup({
     if (Array.isArray(zcodeDbs) && zcodeDbs.length > 0) {
       summary.push({
         label: "ZCode",
+        status: "detected",
+        detail: "Passive reader (no hook needed)",
+      });
+    }
+  }
+
+  // wcode: another OpenCode-derived agent, read passively like OpenBitFun/ZCode —
+  // it writes its own database, so there is no hook to install.
+  {
+    const wcodeDbs = resolveWcodeDbPaths({ home: os.homedir(), env: process.env });
+    if (Array.isArray(wcodeDbs) && wcodeDbs.length > 0) {
+      summary.push({
+        label: "wcode",
         status: "detected",
         detail: "Passive reader (no hook needed)",
       });

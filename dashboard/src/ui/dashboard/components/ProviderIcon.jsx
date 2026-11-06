@@ -306,6 +306,22 @@ function ZcodeIcon({ size = 16, className = "" }) {
   );
 }
 
+// wcode — the "W" from its own app icon, redrawn as a mono mark. The four
+// glyph paths come from the product's 1024x1024 icon (white on black); only the
+// letterform is kept, so an <img> boundary resolves it to solid black like the
+// other currentColor marks and dark mode inverts it (see
+// LeaderboardProviderColumnHeader's INVERT_IN_DARK).
+function WcodeIcon({ size = 16, className = "" }) {
+  return (
+    <svg width={size} height={size} viewBox="137 274 750 475" fill="currentColor" fillRule="evenodd" className={className}>
+      <path d="M 267.00 294.00 L 349.31 532.68 L 294.30 692.19 L 157.00 294.00 Z" />
+      <path d="M 307.00 729.00 L 444.30 330.81 L 499.31 490.32 L 417.00 729.00 Z" />
+      <path d="M 567.00 294.00 L 649.31 532.68 L 594.30 692.19 L 457.00 294.00 Z" />
+      <path d="M 607.00 729.00 L 757.00 294.00 L 867.00 294.00 L 717.00 729.00 Z" />
+    </svg>
+  );
+}
+
 // RooCode (Roo-Cline) — official mono logomark from @lobehub/icons.
 // A stylized bird/kangaroo silhouette, mono with currentColor for dark/light.
 function RoocodeIcon({ size = 16, className = "" }) {
@@ -369,6 +385,7 @@ const PROVIDER_ICON_MAP = {
   ACODE: AcodeIcon,
   CLAUDE: ClaudeIcon,
   ZCODE: ZcodeIcon,
+  WCODE: WcodeIcon,
   CODEBUDDY: CodeBuddyIcon,
   // WorkBuddy ships the same Tencent "buddy" mascot mark as CodeBuddy.
   WORKBUDDY: CodeBuddyIcon,

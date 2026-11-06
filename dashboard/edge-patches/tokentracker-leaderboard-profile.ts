@@ -564,6 +564,9 @@ const KNOWN_SOURCES = new Set([
   // showed a leaderboard entry's ZCode tokens under a label the table beside it
   // had already split out into its own column.
   "zcode",
+  // wcode writes source "wcode" — same reason as ZCode above: its usage must not
+  // fall into the profile modal's generic "other" bucket.
+  "wcode",
 ]);
 function canonicalSource(s: string) {
   return KNOWN_SOURCES.has(s) ? s : "other";

@@ -5396,6 +5396,275 @@ async function readZcodeSessionRows(dbPath, sqliteOptions = {}) {
   }
 }
 
+// Provider gate for an OpenCode-derived agent's own turns, tolerant of both
+// spellings the lineage writes: upstream uses providerID/modelID, while forks
+// (wcode among them) write camelCase providerId/modelId. opencodeMessageProvider
+// only reads providerID, so a camelCase row would resolve to "" and every such
+// turn would be dropped — verified on a live wcode database, where all 15257
+// legacy messages carry providerId and none carry providerID.
+function opencodeForkMessageProvider(data) {
+  return (
+    opencodeMessageProvider(data) ||
+    data?.providerId ||
+    data?.provider_id ||
+    data?.model?.providerId ||
+    ""
+  );
+}
+
+// Same exclusion rule as isZcodeNativeMessage, with the tolerant resolver: turns
+// the direct Claude/Codex/Gemini CLIs already count are dropped so importing a
+// fork's mirror of them cannot double-count. It keys off the provider, never the
+// model id.
+function isOpencodeForkNativeMessage(data) {
+  if (!data) return false;
+  const provider = String(opencodeForkMessageProvider(data)).toLowerCase();
+  if (!provider) return false;
+  return !(
+    provider.includes("anthropic") ||
+    provider.includes("openai") ||
+    provider.includes("google")
+  );
+}
+
+const WCODE_DB_FILE_NAME = "db.sqlite";
+
+const WCODE_TABLE_PROBE_SQL =
+  "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('session','message')";
+
+// wcode is its own product with its own data root (<home>/.wcode, `cli/db/db.sqlite`
+// underneath — the same layout its upstream uses). It is resolved independently of
+// ZCode: neither home is a fallback for the other, so the two installs are described
+// separately even on a machine that has both.
+//
+// WCODE_HOME names the ~/.wcode directory itself. An explicit override pins the
+// install: when its database is missing we must not fall back to an APPDATA copy, or
+// the browser would describe a different install than the one the user pointed at
+// (the same rule resolveZcodeDbPaths applies).
+function resolveWcodeDbPaths(env = process.env, deps = {}) {
+  const platform = deps.platform || process.platform;
+  const existsSync = deps.existsSync || fssync.existsSync;
+  const injectedHome =
+    typeof deps.nativeHome === "string" && deps.nativeHome ? deps.nativeHome : null;
+  const home =
+    injectedHome ||
+    (platform === "win32"
+      ? env.USERPROFILE || env.HOME || os.homedir()
+      : env.HOME || os.homedir());
+  const envValue = (key) =>
+    (typeof env[key] === "string" && env[key].trim() ? env[key].trim() : null);
+
+  const candidates = [];
+  const homeOverride = envValue("TOKENTRACKER_WCODE_HOME") || envValue("WCODE_HOME");
+  if (homeOverride) {
+    candidates.push(path.join(path.resolve(homeOverride), "cli", "db", WCODE_DB_FILE_NAME));
+  } else {
+    candidates.push(path.join(home, ".wcode", "cli", "db", WCODE_DB_FILE_NAME));
+    if (!injectedHome && platform === "win32") {
+      const appData = envValue("APPDATA");
+      if (appData) {
+        candidates.push(path.join(appData, "wcode", "cli", "db", WCODE_DB_FILE_NAME));
+      }
+    }
+  }
+
+  return [...new Set(candidates.map((value) => path.resolve(value)))]
+    .filter((value) => existsSync(value))
+    .sort();
+}
+
+// Session metadata for the session browser. Only the bookkeeping columns are
+// selected: wcode keeps the transcript in message.data and part.data and neither
+// belongs in the browser (see the privacy note at the top of session-analytics.js).
+const WCODE_SESSION_SQL = [
+  "SELECT",
+  "  id,",
+  "  title,",
+  "  directory,",
+  "  time_created,",
+  "  time_updated",
+  "FROM session",
+  "WHERE id IS NOT NULL",
+  "ORDER BY time_created ASC, id ASC",
+].join("\n");
+
+async function readWcodeSessionRows(dbPath, sqliteOptions = {}) {
+  if (!dbPath || !fssync.existsSync(dbPath)) return [];
+  const options = {
+    label: "wcode",
+    maxBuffer: 32 * 1024 * 1024,
+    timeout: 30_000,
+    readOnly: true,
+    throwOnReadFailure: true,
+    ...sqliteOptions,
+  };
+  let snapshot = null;
+  let effectiveDbPath = dbPath;
+  if (isUncPath(dbPath)) {
+    try {
+      snapshot = snapshotSqliteDb(dbPath);
+      effectiveDbPath = snapshot.path;
+    } catch (_e) { }
+  }
+  try {
+    const tables = new Set(
+      (await readSqliteJsonRowsAsync(effectiveDbPath, WCODE_TABLE_PROBE_SQL, options))
+        .map((row) => row?.name)
+        .filter(Boolean),
+    );
+    if (!tables.has("session")) return [];
+    return await readSqliteJsonRowsAsync(effectiveDbPath, WCODE_SESSION_SQL, options);
+  } finally {
+    if (snapshot) snapshot.cleanup();
+  }
+}
+
+// wcode inherits its lineage's inclusive counter convention: cache read counts
+// inside input and reasoning inside output. Verified on a live database — input +
+// output equals computed_total on all 8358 completed model_usage rows, and
+// raw_usage_json reports totalTokens = inputTokens + outputTokens while listing
+// cacheReadTokens separately. normalizeZcodeInclusiveTokens splits those subsets
+// out again, which is what the shared OpenCode parser expects.
+const WCODE_MODEL_USAGE_SQL = [
+  "SELECT",
+  "  mu.id,",
+  "  mu.logical_request_id,",
+  "  mu.attempt_index,",
+  "  mu.session_id,",
+  "  mu.provider_id,",
+  "  mu.model_id,",
+  "  mu.started_at,",
+  "  mu.input_tokens,",
+  "  mu.output_tokens,",
+  "  mu.reasoning_tokens,",
+  "  mu.cache_creation_input_tokens,",
+  "  mu.cache_read_input_tokens,",
+  "  s.directory AS directory",
+  "FROM model_usage AS mu",
+  "LEFT JOIN session AS s ON s.id = mu.session_id",
+  "WHERE mu.status = 'completed'",
+  "  AND trim(mu.model_id) != ''",
+  "  AND (",
+  "    mu.input_tokens > 0 OR mu.output_tokens > 0 OR mu.reasoning_tokens > 0 OR",
+  "    mu.cache_creation_input_tokens > 0 OR mu.cache_read_input_tokens > 0",
+  "  )",
+  "ORDER BY mu.started_at ASC, mu.id ASC",
+].join("\n");
+
+// wcode's model_usage table has the same columns ZCode's does, so the layout probe
+// is shared; only the reader below is its own.
+function hasWcodeNativeUsageSchema(dbPath, sqliteOptions = {}) {
+  return hasZcodeNativeUsageSchema(dbPath, sqliteOptions);
+}
+
+function readWcodeNativeUsageMessages(dbPath, sqliteOptions = {}) {
+  let snapshot = null;
+  let effectiveDbPath = dbPath;
+  if (isUncPath(dbPath)) {
+    try {
+      snapshot = snapshotSqliteDb(dbPath);
+      effectiveDbPath = snapshot.path;
+    } catch (_error) { }
+  }
+
+  let rows;
+  try {
+    if (!detectZcodeNativeUsageLayout(effectiveDbPath, sqliteOptions)) return null;
+    rows = readSqliteJsonRows(effectiveDbPath, WCODE_MODEL_USAGE_SQL, {
+      label: "wcode",
+      maxBuffer: 50 * 1024 * 1024,
+      timeout: 30_000,
+      ...sqliteOptions,
+      throwOnReadFailure: true,
+    });
+  } catch (_error) {
+    return null;
+  } finally {
+    if (snapshot) snapshot.cleanup();
+  }
+
+  const messages = [];
+  for (const row of rows) {
+    const providerID = String(row?.provider_id || "").trim();
+    const modelID = String(row?.model_id || "").trim();
+    const sessionID = String(row?.session_id || "").trim();
+    const logicalRequestId = String(row?.logical_request_id || "").trim();
+    const attemptIndex = toNonNegativeInt(row?.attempt_index);
+    const id = String(row?.id || "").trim() ||
+      (logicalRequestId ? logicalRequestId + "#" + attemptIndex : "");
+    const startedAt = coerceEpochMs(row?.started_at);
+    if (!providerID || !modelID || !sessionID || !id || !startedAt) continue;
+
+    const data = {
+      id,
+      sessionID,
+      role: "assistant",
+      providerID,
+      modelID,
+      time: { created: startedAt, completed: startedAt },
+      tokens: normalizeZcodeInclusiveTokens({
+        input: row?.input_tokens,
+        output: row?.output_tokens,
+        reasoning: row?.reasoning_tokens,
+        cache: {
+          read: row?.cache_read_input_tokens,
+          write: row?.cache_creation_input_tokens,
+        },
+      }),
+    };
+    if (typeof row?.directory === "string" && row.directory.trim()) {
+      data.path = { cwd: row.directory.trim() };
+    }
+    if (!isOpencodeForkNativeMessage(data)) continue;
+    messages.push({ id, sessionID, timeUpdated: startedAt, data });
+  }
+  return messages;
+}
+
+// Native rows are authoritative from the moment model_usage starts, but the table
+// is not a historical backfill: installs accumulate weeks of history in the
+// OpenCode message tables first, and 67 sessions on a live database carry usage
+// with no native rows at all. So the two sets are merged per SESSION, not against
+// one global watermark — a global cut would drop 1782 legacy messages (463M
+// tokens) that belong to sessions the native table never covered.
+//
+// Within a session that does have native rows, the native table covers it from its
+// first row onward and every legacy message in that window maps 1:1 onto an
+// assistant_message_id (verified: zero legacy messages in such a session predate
+// its native start), so only pre-native legacy rows are kept there.
+function readWcodeDbMessages(dbPath, sqliteOptions = {}) {
+  if (!dbPath || !fssync.existsSync(dbPath)) return [];
+  const nativeMessages = readWcodeNativeUsageMessages(dbPath, sqliteOptions);
+  const legacyMessages = readOpencodeDbMessages(dbPath, sqliteOptions)
+    .filter((message) => isOpencodeForkNativeMessage(message.data))
+    .map(normalizeZcodeLegacyMessage);
+  if (nativeMessages === null) return legacyMessages;
+
+  // First native timestamp per session — the boundary that session's legacy rows
+  // are compared against.
+  const nativeStartBySession = new Map();
+  for (const message of nativeMessages) {
+    const sessionID = String(message?.sessionID || "").trim();
+    const timestampMs = coerceEpochMs(message?.timeUpdated);
+    if (!sessionID || !timestampMs) continue;
+    const current = nativeStartBySession.get(sessionID);
+    if (current === undefined || timestampMs < current) {
+      nativeStartBySession.set(sessionID, timestampMs);
+    }
+  }
+
+  const historicalMessages = legacyMessages.filter((message) => {
+    const sessionID = String(message?.sessionID || "").trim();
+    const boundary = nativeStartBySession.get(sessionID);
+    // Sessions with no native rows keep their whole legacy history.
+    if (boundary === undefined) return true;
+    const timestampMs = coerceEpochMs(message?.timeUpdated);
+    return timestampMs > 0 && timestampMs < boundary;
+  });
+  return [...historicalMessages, ...nativeMessages];
+}
+
+
 const OPENCODE_DB_FILE_NAME = "opencode.db";
 
 const OPENCODE_TABLE_PROBE_SQL =
@@ -23252,6 +23521,10 @@ module.exports = {
   // session's per-model totals are named like the queue buckets sync writes
   // (normalizeOpencodeTokens, used alongside it, is exported already).
   normalizeOpencodeModelFields,
+  readWcodeDbMessages,
+  resolveWcodeDbPaths,
+  readWcodeSessionRows,
+  hasWcodeNativeUsageSchema,
   hasZcodeNativeUsageSchema,
   resolveQoderDbPath,
   resolveQoderDbPaths,

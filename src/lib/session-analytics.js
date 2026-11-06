@@ -48,6 +48,9 @@ const {
   resolveZcodeDbPaths,
   readZcodeSessionRows,
   readZcodeDbMessages,
+  resolveWcodeDbPaths,
+  readWcodeSessionRows,
+  readWcodeDbMessages,
   normalizeOpencodeTokens,
   normalizeOpencodeModelFields,
   resolveOpencodeDbPaths,
@@ -1675,27 +1678,24 @@ function zcodeMessageTimestampMs(message) {
 }
 
 /**
- * ZCode session scanner.
+ * Session scanner shared by the OpenCode-derived agents that keep one SQLite
+ * database with a `session` row per conversation and the counters in
+ * message.data JSON (ZCode, and wcode which shares its layout). A session row is
+ * the scan unit, and discovery hands the scan the messages already grouped by
+ * session_id.
  *
- * ZCode (Z.ai's coding agent, another OpenCode fork) keeps one SQLite database
- * (~/.zcode/cli/db/db.sqlite — see resolveZcodeDbPaths in rollout.js) whose
- * `session` table holds one row per session and whose `message` table holds one
- * row per turn, with the assistant counters in message.data JSON. A session row
- * is therefore the scan unit, and discovery hands the scan the messages already
- * grouped by session_id.
+ * PRIVACY: only tokens, the model id and timestamps are read. The transcript
+ * lives in message.data (prompts, assistant text, tool payloads) and in
+ * part.data; neither is touched here, and the projections the readers return are
+ * normalized down to counters before they ever reach this function. The `part`
+ * table is never selected anywhere.
  *
- * PRIVACY: only tokens, the model id and timestamps are read. ZCode keeps the
- * transcript in message.data (prompts, assistant text, tool payloads) and in
- * part.data; neither is touched here, and the projection readZcodeDbMessages
- * returns is normalized down to counters before it ever reaches this function.
- * The `part` table is never selected anywhere.
- *
- * The counters are mapped through the usage parser's own normalization
- * (readZcodeDbMessages splits ZCode's INCLUSIVE input/output counters, then
+ * The counters are mapped through the usage parser's own normalization (the
+ * readers split the lineage's INCLUSIVE input/output counters, then
  * normalizeOpencodeTokens produces the queue columns), so a session's totals
  * cannot drift from the half-hour buckets sync writes for the same rows.
  */
-function scanZcodeSession({ dbPath, session, sessionId, messages }) {
+function scanOpencodeForkSession({ dbPath, session, sessionId, messages }, source) {
   const rows = Array.isArray(messages) ? messages : [];
   const id = typeof sessionId === "string" && sessionId.trim()
     ? sessionId.trim()
@@ -1753,11 +1753,11 @@ function scanZcodeSession({ dbPath, session, sessionId, messages }) {
 
   return finalizeRecord({
     version: SIDECAR_VERSION,
-    session_hash: sessionHash("zcode", id || dbPath),
+    session_hash: sessionHash(source, id || dbPath),
     session_id: id || null,
     title: cleanSessionTitle(session?.title),
-    source: "zcode",
-    // ZCode records the session's working directory, so the browser can show
+    source,
+    // The database records the session's working directory, so the browser can show
     // where it ran. project_key is that directory's basename, the same
     // convention the Claude and Codex scanners use.
     project_key: directory ? projectKey(directory, null) : null,
@@ -1791,7 +1791,7 @@ function scanZcodeSession({ dbPath, session, sessionId, messages }) {
       confidence: usageEvents > 0 ? "observed" : "partial",
       retry_confidence: "inferred",
       content_retained: false,
-      usage: "message.data.tokens.input+output+reasoning+cache.read+cache.write",
+      usage: "tokens.input+output+reasoning+cache.read+cache.write",
       cost: "model_pricing",
     },
   });
@@ -2052,6 +2052,62 @@ async function discoverZcodeSessions(env = process.env, deps = {}) {
   return descriptors;
 }
 
+// wcode keeps the same database shape as ZCode but is a separate install with its
+// own home, so it gets its own discovery rather than a shared one: neither home
+// is a fallback for the other, and a machine running both describes both.
+async function discoverWcodeSessions(env = process.env, deps = {}) {
+  const descriptors = [];
+  for (const dbPath of resolveWcodeDbPaths(env, deps)) {
+    let sessions = [];
+    let messages = [];
+    try {
+      sessions = await readWcodeSessionRows(dbPath);
+      messages = readWcodeDbMessages(dbPath);
+    } catch (error) {
+      // A locked or half-written database must not poison the sidecar: skip this
+      // install and let the next refresh retry.
+      if (!process.env.NODE_TEST_CONTEXT) {
+        console.warn(`[session-analytics] skipped wcode database: ${error?.message || error}`);
+      }
+      continue;
+    }
+    const messagesBySession = new Map();
+    for (const message of messages) {
+      const key = typeof message?.sessionID === "string" ? message.sessionID.trim() : "";
+      if (!key) continue;
+      const list = messagesBySession.get(key);
+      if (list) list.push(message);
+      else messagesBySession.set(key, [message]);
+    }
+    // Message times drive the active-time accumulation, and the reader returns the
+    // native rows first with any older history after them, so hand them over in
+    // chronological order.
+    for (const list of messagesBySession.values()) {
+      list.sort((a, b) => zcodeMessageTimestampMs(a) - zcodeMessageTimestampMs(b));
+    }
+    const seen = new Set();
+    for (const session of sessions) {
+      const key = typeof session?.id === "string" ? session.id.trim() : "";
+      if (!key) continue;
+      seen.add(key);
+      descriptors.push({ dbPath, sessionId: key, session, messages: messagesBySession.get(key) || [] });
+    }
+    for (const [key, list] of messagesBySession) {
+      if (seen.has(key)) continue;
+      descriptors.push({ dbPath, sessionId: key, session: null, messages: list });
+    }
+  }
+  return descriptors;
+}
+
+function scanZcodeSession(descriptor) {
+  return scanOpencodeForkSession(descriptor, "zcode");
+}
+
+function scanWcodeSession(descriptor) {
+  return scanOpencodeForkSession(descriptor, "wcode");
+}
+
 // opencode sessions are rows, not files: discovery reads each database once
 // (session metadata plus the index-only turn counts) and emits one descriptor
 // per session, for the same cache reason as the AstrBot and ZCode discoveries
@@ -2111,7 +2167,7 @@ async function discoverSessionFiles(home, env = process.env, deps = {}) {
   const grokHome = resolveGrokHome(home);
   const claudeRoots = providerRoots(home, ".claude", env, deps);
   const codexRoots = providerRoots(home, ".codex", env, deps);
-  const [claudeGroups, codexGroups, archivedGroups, grok, dsh, astrbot, openbitfun, zcode, opencode] = await Promise.all([
+  const [claudeGroups, codexGroups, archivedGroups, grok, dsh, astrbot, openbitfun, zcode, wcode, opencode] = await Promise.all([
     Promise.all(claudeRoots.map((r) => listClaudeProjectFiles(path.join(r, "projects")))),
     Promise.all(codexRoots.map((r) => listRolloutFilesDeep(path.join(r, "sessions")))),
     Promise.all(codexRoots.map((r) => listRolloutFilesDeep(path.join(r, "archived_sessions")))),
@@ -2129,6 +2185,8 @@ async function discoverSessionFiles(home, env = process.env, deps = {}) {
     // Same isolation once more for ZCode: without the injected home a test would
     // read the developer's real ~/.zcode database instead of its fixture.
     discoverZcodeSessions(env, { ...deps, nativeHome: home }),
+    // Same isolation once more for wcode, a separate install with its own home.
+    discoverWcodeSessions(env, { ...deps, nativeHome: home }),
     // And again for opencode: the injected home keeps a test off the developer's
     // real ~/.local/share/opencode database (and off the machine's WSL install,
     // since resolveOpencodeDbPaths only probes WSL for the real home).
@@ -2144,7 +2202,7 @@ async function discoverSessionFiles(home, env = process.env, deps = {}) {
   const claude = allClaude.filter((filePaths) => !filePaths.some((filePath) => filePath
     .split(path.sep)
     .some((segment) => segment.endsWith(CLAUDE_MEM_OBSERVER_PROJECT_SUFFIX))));
-  return { claude, codex: groupCodexFiles([...codex, ...archived]), grok, dsh, astrbot, openbitfun, zcode, opencode };
+  return { claude, codex: groupCodexFiles([...codex, ...archived]), grok, dsh, astrbot, openbitfun, zcode, wcode, opencode };
 }
 
 function filesSignature(files) {
@@ -2297,6 +2355,7 @@ async function buildSessionAnalyticsInternal({ home = os.homedir(), force = fals
     // One entry per database, not per session, for the same reason as AstrBot:
     // the file list is what the refresh signature hashes.
     ...[...new Set(discovered.zcode.map((descriptor) => descriptor.dbPath))],
+    ...[...new Set(discovered.wcode.map((descriptor) => descriptor.dbPath))],
     ...[...new Set(discovered.opencode.map((descriptor) => descriptor.dbPath))],
   ]);
   if (!force && previousMeta?.version === SIDECAR_VERSION && previousMeta.signature === signature) {
@@ -2348,6 +2407,15 @@ async function buildSessionAnalyticsInternal({ home = os.homedir(), force = fals
       // onto a single entry and all but one are rescanned (same as AstrBot).
       cacheKey: sessionFileCacheKey("zcode", [descriptor.dbPath, descriptor.sessionId]),
       scan: () => scanZcodeSession(descriptor),
+    })),
+    ...discovered.wcode.map((descriptor) => ({
+      source: "wcode",
+      filePath: descriptor.dbPath,
+      // Every session of one database shares that database's stat, so the cache
+      // key has to carry the session identity as well — without it they collapse
+      // onto a single entry and all but one are rescanned (same as AstrBot/ZCode).
+      cacheKey: sessionFileCacheKey("wcode", [descriptor.dbPath, descriptor.sessionId]),
+      scan: () => scanWcodeSession(descriptor),
     })),
     ...discovered.opencode.map((descriptor) => ({
       source: "opencode",
@@ -2962,6 +3030,7 @@ module.exports = {
   scanAstrBotSession,
   scanOpenBitFunSession,
   scanZcodeSession,
+  scanWcodeSession,
   scanOpencodeSession,
   buildSessionAnalytics,
   summarizeSessions,

@@ -83,6 +83,7 @@ export function prependMeRowToPage({ entries, me, meLabel }) {
     astrbot_tokens: me?.astrbot_tokens ?? "0",
     openbitfun_tokens: me?.openbitfun_tokens ?? "0",
     zcode_tokens: me?.zcode_tokens ?? "0",
+    wcode_tokens: me?.wcode_tokens ?? "0",
     other_tokens: me?.other_tokens ?? "0",
     total_tokens: me?.total_tokens ?? "0",
     estimated_cost_usd: me?.estimated_cost_usd ?? null,

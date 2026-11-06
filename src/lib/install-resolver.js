@@ -131,9 +131,41 @@ function ensureFlatCursor(cursors, providerName, env, preferredKey) {
   cursors[providerName] = merged;
 }
 
+// wcode keeps its CLI database at the same shape ZCode uses — <home>/.wcode on
+// every platform, `cli/db/db.sqlite` underneath — because it is a separate
+// install of the same OpenCode-derived lineage. It is resolved on its own so the
+// two are read as independent products: neither home is a fallback for the other.
+function resolveWcodeNativeDbPath({
+  home = os.homedir(),
+  env = process.env,
+  platform = process.platform,
+  deps = {},
+} = {}) {
+  const existsSync = deps.existsSync || fssync.existsSync;
+  const wcodeHomeOverride =
+    typeof env.WCODE_HOME === "string" ? env.WCODE_HOME.trim() : "";
+  const wcodeHome = wcodeHomeOverride
+    ? path.resolve(wcodeHomeOverride)
+    : path.join(home, ".wcode");
+  // An explicit WCODE_HOME pins the install, the same rule resolveZcodeNativeDbPath
+  // applies: a missing database under the override must not silently fall back to
+  // a different location.
+  const candidates = [
+    path.join(wcodeHome, "cli", "db", "db.sqlite"),
+    ...(!wcodeHomeOverride &&
+    platform === "win32" &&
+    typeof env.APPDATA === "string" &&
+    env.APPDATA.trim()
+      ? [path.join(env.APPDATA.trim(), "wcode", "cli", "db", "db.sqlite")]
+      : []),
+  ];
+  return candidates.find((p) => existsSync(p)) || candidates[0];
+}
+
 module.exports = {
   resolveInstallPaths,
   resolveZcodeNativeDbPath,
+  resolveWcodeNativeDbPath,
   ensureNamespacedCursors,
   ensureFlatCursor,
 };

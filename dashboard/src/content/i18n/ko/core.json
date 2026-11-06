@@ -601,5 +601,6 @@
   "settings.account.avatar": "아바타 이미지 URL",
   "settings.account.avatarHint": "이미지 링크(https)를 붙여넣으세요",
   "settings.account.avatarPlaceholder": "https://example.com/me.png",
-  "settings.account.avatarInvalid": "http(s)로 시작하는 이미지 URL을 입력하세요."
+  "settings.account.avatarInvalid": "http(s)로 시작하는 이미지 URL을 입력하세요.",
+  "provider.display.wcode": "wcode"
 }

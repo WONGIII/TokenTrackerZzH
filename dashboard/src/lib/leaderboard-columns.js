@@ -55,6 +55,15 @@ export const LEADERBOARD_TOKEN_COLUMNS = [
     icon: "/brand-logos/zcode.svg",
     provider: "zcode",
   },
+  // wcode (source "wcode") gets its own column for the same reason ZCode does:
+  // without one its usage folds into other_tokens and a user whose main agent is
+  // wcode sees the generic "Other" column as their biggest provider.
+  {
+    key: "wcode_tokens",
+    copyKey: "provider.display.wcode",
+    icon: "/brand-logos/wcode.svg",
+    provider: "wcode",
+  },
   { key: "opencode_tokens", copyKey: "leaderboard.column.opencode", icon: "/brand-logos/opencode.svg" },
   { key: "openclaw_tokens", copyKey: "leaderboard.column.openclaw", icon: "/brand-logos/openclaw.svg" },
   { key: "hermes_tokens", copyKey: "leaderboard.column.hermes", icon: "/brand-logos/hermes.svg" },

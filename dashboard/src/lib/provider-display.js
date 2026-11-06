@@ -19,6 +19,7 @@ const SPECIAL_PROVIDER_COPY_KEYS = {
   astrbot: "provider.display.astrbot",
   openbitfun: "provider.display.openbitfun",
   zcode: "provider.display.zcode",
+  wcode: "provider.display.wcode",
   omp: "provider.display.omp",
   omo: "provider.display.omo",
   traecn: "provider.display.trae_work_cn",
